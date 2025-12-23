@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>محلل الامتثال القانوني للمتاجر الإلكترونية</title>
+    
+    <!-- Font Awesome -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- Main Styles -->
+    <link rel="stylesheet" href="/static/css/style.css">
+
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-gavel"></i> محلل الامتثال القانوني</h1>
+            <p>تحليل سياسات المتاجر الإلكترونية للامتثال بالقوانين السعودية</p>
+        </div>
+
+        <div class="main-content">
+            <div class="card">
+                <h2 style="margin-bottom: 20px;">
+                    <i class="fas fa-file-alt"></i> إدخال البيانات
+                </h2>
+                
+                <form id="analysisForm">
+                    <div class="form-group">
+                        <label for="shopName">
+                            <i class="fas fa-store"></i> اسم المتجر
+                        </label>
+                        <input type="text" id="shopName" required placeholder="مثال: متجر الأزياء العصرية">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="shopSpecialization">
+                            <i class="fas fa-tags"></i> تخصص المتجر
+                        </label>
+                        <input type="text" id="shopSpecialization" required placeholder="مثال: ملابس نسائية">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="policyType">
+                            <i class="fas fa-list"></i> نوع السياسة
+                        </label>
+                        <select id="policyType" required>
+                            <option value="">-- اختر نوع السياسة --</option>
+                            <option value="سياسات الاسترجاع و الاستبدال">سياسات الاسترجاع والاستبدال</option>
+                            <option value="سياسة الحساب و الخصوصية">سياسة الحساب والخصوصية</option>
+                            <option value="سياسة الشحن و التوصيل">سياسة الشحن والتوصيل</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="policyText">
+                            <i class="fas fa-align-right"></i> نص السياسة
+                        </label>
+                        <textarea id="policyText" required placeholder="الصق نص السياسة هنا..."></textarea>
+                    </div>
+
+                    <button type="submit" class="btn" id="analyzeBtn">
+                        <i class="fas fa-search"></i> تحليل السياسة
+                    </button>
+                </form>
+
+                <div id="loading" class="loading-overlay" style="display: none;">
+                  <div class="spinner"></div>
+                </div>
+
+                <div class="error-message" id="errorMessage"></div>
+            </div>
+
+            <div class="card report-section" id="reportSection">
+                <h2 style="margin-bottom: 20px;">
+                    <i class="fas fa-chart-line"></i> تقرير التحليل
+                </h2>
+                <div id="reportContent"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Script -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
