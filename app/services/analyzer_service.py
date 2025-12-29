@@ -15,7 +15,7 @@ from app.models import (
     ImprovementDetail
 )
 from app.services.openai import OpenAIService
-from app.services.gemini_service import GeminiService
+from app.services.gemini import GeminiService
 from app.prompts.policy_matcher import get_policy_matcher_prompt
 from app.prompts.compliance_analyzer import get_compliance_analyzer_prompt
 from app.prompts.policy_generator import get_policy_regeneration_prompt

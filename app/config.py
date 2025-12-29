@@ -6,33 +6,53 @@ class Settings(BaseSettings):
     # ============================================
     # AI Provider Selection
     # ============================================
-    ai_provider: str = "openai"  # "openai" أو "gemini"
+    ai_provider: str = "openai"
     
     # ============================================
-    # OpenAI Configuration - Light Model (للمهام السهلة)
+    # OpenAI Configuration
     # ============================================
     openai_api_key: str = ""
-    openai_light_model: str = "gpt-4o-mini"  # موديل خفيف للـ Stage 1
+    openai_light_model: str = "gpt-4o-mini"
     openai_light_temperature: float = 0.2
     openai_light_max_tokens: int = 2000
-    
-    # OpenAI Heavy Model (للمهام الصعبة)
-    openai_heavy_model: str = "gpt-4o"  # موديل قوي للـ Stage 2-4
+    openai_heavy_model: str = "gpt-4o"
     openai_heavy_temperature: float = 0.3
     openai_heavy_max_tokens: int = 16000
     
     # ============================================
-    # Gemini Configuration - Light Model (للمهام السهلة)
+    # Gemini Configuration
     # ============================================
     gemini_api_key: str = ""
-    gemini_light_model: str = "gemini-1.5-flash"  # موديل خفيف للـ Stage 1
+    gemini_light_model: str = "gemini-1.5-flash"
     gemini_light_temperature: float = 0.2
     gemini_light_max_tokens: int = 2000
-    
-    # Gemini Heavy Model (للمهام الصعبة)
-    gemini_heavy_model: str = "gemini-2.0-flash-exp"  # موديل قوي للـ Stage 2-4
+    gemini_heavy_model: str = "gemini-2.0-flash-exp"
     gemini_heavy_temperature: float = 0.3
     gemini_heavy_max_tokens: int = 16000
+    
+    # ============================================
+    # Redis Configuration (Shared)
+    # ============================================
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: str = ""
+    redis_ssl: bool = False
+    redis_decode_responses: bool = True
+    
+    # ============================================
+    # Celery Configuration (NEW)
+    # ============================================
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/2"
+    celery_task_track_started: bool = True
+    celery_task_time_limit: int = 600
+    celery_task_soft_time_limit: int = 540
+    celery_task_acks_late: bool = True
+    celery_worker_prefetch_multiplier: int = 1
+    celery_result_expires: int = 86400
+    celery_task_max_retries: int = 3
+    celery_task_default_retry_delay: int = 60
     
     # ============================================
     # API Configuration
@@ -77,19 +97,9 @@ class Settings(BaseSettings):
     deduplication_ttl: int = 300
     
     # ============================================
-    # Redis Configuration for Idempotency
-    # ============================================
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: str = ""
-    redis_ssl: bool = False
-    redis_decode_responses: bool = True
-    
-    # ============================================
     # Idempotency Settings
     # ============================================
-    idempotency_ttl: int = 86400  # 24 hours
+    idempotency_ttl: int = 86400
     idempotency_key_header: str = "X-Idempotency-Key"
     idempotency_enable: bool = True
     

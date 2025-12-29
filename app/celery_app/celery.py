@@ -1,0 +1,56 @@
+"""
+Celery Application Configuration
+"""
+from celery import Celery
+from app.config import get_settings
+
+settings = get_settings()
+
+# Create Celery instance
+celery_app = Celery(
+    'legal_policy_analyzer',
+    broker=settings.celery_broker_url,
+    backend=settings.celery_result_backend,
+    include=['app.celery_app.tasks']  # Auto-discover tasks
+)
+
+# Celery Configuration
+celery_app.conf.update(
+    # Task execution settings
+    task_track_started=settings.celery_task_track_started,
+    task_time_limit=settings.celery_task_time_limit,
+    task_soft_time_limit=settings.celery_task_soft_time_limit,
+    task_acks_late=settings.celery_task_acks_late,
+    worker_prefetch_multiplier=settings.celery_worker_prefetch_multiplier,
+    
+    # Result settings
+    result_expires=settings.celery_result_expires,
+    result_persistent=True,
+    
+    # Serialization
+    task_serializer='json',
+    result_serializer='json',
+    accept_content=['json'],
+    
+    # Timezone
+    timezone='Asia/Riyadh',
+    enable_utc=True,
+    
+    # Retry settings
+    task_default_retry_delay=settings.celery_task_default_retry_delay,
+    task_max_retries=settings.celery_task_max_retries,
+    
+    # Beat schedule (for periodic tasks)
+    beat_schedule={
+        'cleanup-old-results': {
+            'task': 'app.celery_app.tasks.cleanup_old_results',
+            'schedule': 3600.0,  # Every hour
+        },
+    },
+)
+
+# Celery events
+@celery_app.task(bind=True)
+def debug_task(self):
+    """Debug task to test Celery"""
+    print(f'Request: {self.request!r}')

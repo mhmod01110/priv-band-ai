@@ -67,7 +67,7 @@ class IdempotencyService:
             "policy_type": request_data.get("policy_type", ""),
             # استخدام أول 2000 حرف فقط للمقارنة
             "policy_text_hash": hashlib.sha256(
-                request_data.get("policy_text", "")[:2000].encode()
+                request_data.get("policy_text", "").encode()
             ).hexdigest()
         }
         
