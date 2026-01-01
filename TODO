@@ -32,18 +32,7 @@ Database (Store Before and After -- جزء السياسات الغير محسن�
 # - app/main.py (enhance health check)
 
 
-جزء ال programming stack :
-Front: React
-Back: Express (fast, minimize) - Nest.js (Enterprise, Scalable, Complex)
-Db: Postgress
+نظبط جزء ال task  و analyze  و stage 0
+و نستخدم utils policy validator من غير ai بعدين نشوف مستاهلة AI ولا لا
 
-
-سيناريو لو اليوزر لغى ال request بتاعه في النص ... افكر فيها
-
-graceful_degradation.py
-provider_manager.py
-quota_tracker.py
-error_handler.py
-# - app/celery_app/tasks.py (add fault tolerance)
-# - app/api/analyze.py (add health endpoints)
-# - app/main.py (enhance health check)
+هنحذف من analyze  و نحط في celery task
