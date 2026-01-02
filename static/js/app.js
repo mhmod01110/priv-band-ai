@@ -1,6 +1,7 @@
 /**
  * Main Application Logic
  * Integrates: Form Handling -> API (Celery) -> SSE Monitoring -> Report Rendering
+ * Enhanced with comprehensive stage-by-stage feedback and Mismatch Handling
  */
 
 // Global State
@@ -9,11 +10,11 @@ let currentIdempotencyKey = null;
 let currentTaskMonitor = null;
 let isProcessing = false;
 
-// Initialization
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('errorMessage').style.display = 'none';
     document.getElementById('reportSection').style.display = 'none';
+    console.log('✅ Application initialized successfully');
 });
 
 // ==========================================
@@ -22,7 +23,6 @@ document.addEventListener('DOMContentLoaded', () => {
 document.getElementById('analysisForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     
-    // A. Validation & Setup
     if (isProcessing) {
         showWarning('⏳ يرجى الانتظار حتى انتهاء التحليل الحالي');
         return;
@@ -35,12 +35,14 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
         policy_text: document.getElementById('policyText').value
     };
 
+    if (!validateFormData(formData)) return;
+
+    // UI Setup
     setFormState(true);
     document.getElementById('errorMessage').style.display = 'none';
     document.getElementById('reportSection').style.display = 'none';
     document.getElementById('loading').style.display = 'flex';
     
-    // Stop any previous monitor to prevent conflicts
     if (currentTaskMonitor) {
         currentTaskMonitor.stop();
         currentTaskMonitor = null;
@@ -49,11 +51,11 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
     const progressBar = new ProgressBar('loading');
 
     try {
-        // B. Submit Analysis Request (POST)
+        // --- Step A: Send POST Request ---
         const headers = { 'Content-Type': 'application/json' };
-        if (currentIdempotencyKey) {
-            headers['X-Idempotency-Key'] = currentIdempotencyKey;
-        }
+        if (currentIdempotencyKey) headers['X-Idempotency-Key'] = currentIdempotencyKey;
+
+        showInfo('📤 جاري إرسال الطلب...');
 
         const response = await fetch('http://localhost:8000/api/analyze', {
             method: 'POST',
@@ -62,108 +64,272 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
         });
 
         if (!response.ok) {
-            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.detail || errorData.message || `Server Error: ${response.status}`);
         }
 
         const result = await response.json();
+        if (result.idempotency_key) currentIdempotencyKey = result.idempotency_key;
 
-        // Update idempotency key for next time
-        if (result.idempotency_key) {
-            currentIdempotencyKey = result.idempotency_key;
-        }
-
-        // C. Handle Cache Hit (Immediate Success)
+        // --- Step B: Handle Synchronous/Cached Result ---
         if (result.status === 'completed' && result.from_cache) {
+            console.log('✅ Cache HIT');
             progressBar.complete();
             setTimeout(() => {
                 document.getElementById('loading').style.display = 'none';
-                showCacheConfirmDialog(result.result, result.result.cache_timestamp, formData);
+                if (result.result.success === false) {
+                     showPolicyMismatch(result.result);
+                } else {
+                     showCacheConfirmDialog(result.result, result.result.cache_timestamp, formData);
+                }
                 setFormState(false);
             }, 500);
             return;
         }
 
-        // D. Handle Async Task (Pending -> Stream)
+        // --- Step C: Handle Async Task via SSE ---
         if (result.status === 'pending') {
-            showInfo('🚀 تم إرسال الطلب للمعالجة - جاري الاتصال بخادم التحليل...');
+            console.log('🚀 Starting SSE monitoring');
+            showInfo('✅ تم الاستلام. جاري بدء التحليل...');
             
-            // Start listening to Server-Sent Events
             currentTaskMonitor = new TaskMonitor(
-              result.task_id,
+                result.task_id,
           
-              // 1. On Progress Update
-              (progress) => {
-                  progressBar.update(progress);
-              },
+                // 1. Progress Update
+                (progress) => progressBar.update(progress),
           
-              // 2. On Completion (Success) - FIX HERE
-              (sseData) => {
-                  console.log("✅ Analysis Completed Raw Data:", sseData);
-                  progressBar.complete();
-                  
-                  setTimeout(() => {
-                      document.getElementById('loading').style.display = 'none';
-                      
-                      // --- FIX: Unwrap the double 'result' ---
-                      let finalOutput = sseData.result;
-          
-                      // Check if the data is nested inside another 'result' key
-                      if (finalOutput && finalOutput.result && finalOutput.result.compliance_report) {
-                          finalOutput = finalOutput.result;
-                      }
-          
-                      // --- FIX: Inject Form Data (Shop Name) ---
-                      // The Celery task might not return the shop name, so we add it from the form
-                      // so displayReport can show the title correctly.
-                      finalOutput.shop_name = formData.shop_name;
-                      finalOutput.policy_type = formData.policy_type;
-          
-                      if (finalOutput && finalOutput.compliance_report) {
-                          currentReport = finalOutput;
-                          displayReport(currentReport);
-                          showSuccess('✅ تم التحليل بنجاح!');
-                      } else {
-                          console.error("Structure mismatch. Available keys:", Object.keys(finalOutput || {}));
-                          showError('استجابة الخادم غير متوقعة: لا توجد بيانات التقرير.');
-                      }
-                      
-                      setFormState(false);
-                  }, 1000);
-              },
+                // 2. Success Completion
+                (sseData) => {
+                    progressBar.complete();
+                    setTimeout(() => {
+                        handleTaskSuccess(sseData, formData);
+                    }, 1000);
+                },
 
-                // 3. On Error (Failure)
-                (errorMessage) => {
-                    console.error("Task Error:", errorMessage);
-                    progressBar.error('فشل التحليل');
+                // 3. Error Handler (Robust)
+                (errorDetails) => {
+                    console.error("❌ App Level Error:", errorDetails);
+                    
+                    // Update the Progress Bar with the short message
+                    progressBar.error(errorDetails); // Passes object safely now
                     
                     setTimeout(() => {
                         document.getElementById('loading').style.display = 'none';
-                        showError('حدث خطأ أثناء التحليل: ' + errorMessage);
+                        // Show the full detailed error box
+                        showGenericError(errorDetails);
                         setFormState(false);
                     }, 1500);
                 }
             );
-            
             currentTaskMonitor.start();
+        } else {
+            throw new Error(`Unexpected task status: ${result.status}`);
         }
 
     } catch (error) {
-        console.error('Analysis Error:', error);
+        console.error('❌ Request Error:', error);
         document.getElementById('loading').style.display = 'none';
-        showError('❌ فشل الاتصال بالخادم: ' + error.message);
+        
+        // Convert simple exception to structure for generic handler
+        const errorStruct = {
+            message: error.message.includes('fetch') ? 'فشل الاتصال بالخادم' : error.message,
+            details: error.message.includes('fetch') ? 'تأكد من تشغيل FastAPI على المنفذ 8000' : null,
+            type: 'request_error'
+        };
+        showGenericError(errorStruct);
         setFormState(false);
     }
 });
 
 // ==========================================
-//  2. Report Rendering Logic
+//  2. Task Success Handler
+// ==========================================
+function handleTaskSuccess(sseData, formData) {
+    document.getElementById('loading').style.display = 'none';
+    
+    let finalOutput = sseData.result;
+    // Unwrap nested result if present
+    if (finalOutput && finalOutput.result && (finalOutput.result.compliance_report !== undefined || finalOutput.result.success !== undefined)) {
+        finalOutput = finalOutput.result;
+    }
+
+    finalOutput.shop_name = formData.shop_name;
+    finalOutput.policy_type = formData.policy_type;
+
+    // Handle Logic Mismatch
+    if (finalOutput.success === false) {
+        showPolicyMismatch(finalOutput);
+        setFormState(false);
+        return;
+    }
+
+    // Handle Success
+    if (finalOutput.compliance_report) {
+        currentReport = finalOutput;
+        displayReport(currentReport);
+        const complianceRatio = finalOutput.compliance_report.overall_compliance_ratio || 0;
+        showSuccess(`✅ تم التحليل بنجاح! الامتثال: ${complianceRatio.toFixed(1)}%`);
+    } else {
+        showGenericError({
+            message: 'استجابة الخادم غير متوقعة',
+            details: 'لا توجد بيانات التقرير في الاستجابة.',
+            rawError: JSON.stringify(finalOutput)
+        });
+    }
+    setFormState(false);
+}
+
+// ==========================================
+//  3. Generic Error Display (Adapts to all types)
+// ==========================================
+function showGenericError(errorObj) {
+    // Default fallback values
+    const message = errorObj.message || "حدث خطأ غير معروف";
+    const details = errorObj.details || null;
+    const type = errorObj.type || "unknown";
+    const stages = errorObj.completedStages || [];
+    const failedStage = errorObj.failedStage || null;
+
+    // Define icons based on type
+    const icons = {
+        'quota_exceeded': 'fa-hand-holding-usd',
+        'timeout': 'fa-hourglass-end',
+        'authentication': 'fa-key',
+        'network': 'fa-wifi',
+        'server_error': 'fa-server',
+        'unknown': 'fa-exclamation-circle'
+    };
+    const icon = icons[type] || icons['unknown'];
+
+    let html = `
+        <div class="error-box" style="border: 1px solid #e74c3c; border-radius: 8px; padding: 20px; background: #fff5f5;">
+            <div style="display: flex; align-items: flex-start; gap: 15px;">
+                <div style="font-size: 2em; color: #c0392b;"><i class="fas ${icon}"></i></div>
+                <div style="flex: 1;">
+                    <h3 style="margin: 0 0 10px 0; color: #c0392b;">${message}</h3>
+                    
+                    ${details ? `<p style="margin: 0 0 15px 0; color: #555; background: #fff; padding: 10px; border-radius: 4px; border: 1px solid #eee;">${details}</p>` : ''}
+                    
+                    ${failedStage ? `<div style="font-size: 0.9em; color: #7f8c8d; margin-bottom: 5px;"><strong>المرحلة الفاشلة:</strong> ${getStageName(failedStage)}</div>` : ''}
+                    
+                    ${stages.length > 0 ? `
+                        <div style="margin-top: 10px;">
+                            <div style="font-size: 0.9em; font-weight: bold; margin-bottom: 5px;">المراحل المكتملة بنجاح:</div>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                                ${stages.map(s => `<span class="badge badge-success" style="font-size: 0.8em;">✓ ${s.name}</span>`).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+            
+            <div style="margin-top: 15px; text-align: left;">
+                <button class="btn btn-secondary btn-small" onclick="location.reload()">
+                    <i class="fas fa-sync"></i> إعادة المحاولة
+                </button>
+            </div>
+        </div>
+    `;
+
+    const errorDiv = document.getElementById('errorMessage');
+    errorDiv.innerHTML = html;
+    errorDiv.style.display = 'block';
+}
+
+// Helper function to get stage name
+function getStageName(stageNum) {
+  const stageMap = {
+      0: 'التهيئة والتحقق',
+      1: 'المرحلة 1: التحقق الأولي',
+      2: 'المرحلة 2: البحث في الذاكرة المؤقتة',
+      3: 'المرحلة 3: تحليل الامتثال',
+      4: 'المرحلة 4: التوليد والتحسين',
+      5: 'المرحلة 5: الإنهاء'
+  };
+  return stageMap[stageNum] || `المرحلة ${stageNum}`;
+}
+
+// Form data validation
+function validateFormData(data) {
+  if (!data.shop_name || data.shop_name.trim().length < 2) {
+      showError('يُرجى إدخال اسم المتجر (حرفان على الأقل)');
+      return false;
+  }
+  if (!data.policy_text || data.policy_text.trim().length < 50) {
+      showError('نص السياسة قصير جداً (الحد الأدنى 50 حرف)');
+      return false;
+  }
+  return true;
+}
+
+// ==========================================
+//  2. Mismatch Rendering Logic (NEW)
+// ==========================================
+function showPolicyMismatch(result) {
+    console.log('Rendering Mismatch Report', result);
+
+    const reason = result.policy_match?.reason || result.message || "النص لا يتطابق مع نوع السياسة المختار";
+    const confidence = result.policy_match?.confidence !== undefined 
+        ? Math.round(result.policy_match.confidence) + '%' 
+        : 'غير محدد';
+    const method = result.policy_match?.method === 'rule_based_stage_0' ? 'القواعد المحلية (سريع)' : 'الذكاء الاصطناعي (دقيق)';
+
+    const html = `
+        <div class="report-header" style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);">
+            <div class="compliance-score" style="color: #c0392b; background: white;">⚠️</div>
+            <div class="grade" style="background: rgba(255,255,255,0.2);">عدم تطابق</div>
+            <div style="text-align: center; opacity: 1; color: white; margin-top: 10px;">
+                ${result.shop_name} - ${result.policy_type}
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title" style="color: #c0392b; border-color: #c0392b;">
+                <i class="fas fa-times-circle"></i> نتيجة التحقق من السياسة
+            </div>
+            <div class="item high">
+                <div class="item-title">تم رفض النص المدخل</div>
+                <div class="item-content">
+                    <p style="font-size: 1.1em; color: #333;"><strong>السبب:</strong> ${reason}</p>
+                    <hr style="margin: 10px 0; border: 0; border-top: 1px solid #eee;">
+                    <p><strong>نسبة الثقة في الرفض:</strong> ${confidence}</p>
+                    <p><strong>طريقة التحقق:</strong> ${method}</p>
+                </div>
+            </div>
+            
+            <div class="item">
+                <div class="item-content">
+                    <i class="fas fa-lightbulb" style="color: #f1c40f;"></i> 
+                    <strong>نصيحة:</strong> يرجى التأكد من اختيار نوع السياسة الصحيح (مثل سياسة الخصوصية، الاسترجاع، الشروط والأحكام) ومطابقته للنص المنسوخ.
+                </div>
+            </div>
+        </div>
+        
+        <div class="export-buttons">
+            <button class="btn btn-secondary" onclick="location.reload()">
+                <i class="fas fa-sync"></i> محاولة مرة أخرى
+            </button>
+        </div>
+    `;
+
+    document.getElementById('reportContent').innerHTML = html;
+    document.getElementById('reportSection').style.display = 'block';
+    
+    // Scroll to report
+    document.getElementById('reportSection').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ==========================================
+//  3. Success Report Rendering Logic
 // ==========================================
 function displayReport(result) {
     console.log('Rendering report for:', result.shop_name);
     
     const report = result.compliance_report;
+    // Robust check prevents crashing if report is missing
     if (!report) {
-        showError('لم يتم إنشاء تقرير (البيانات مفقودة)');
+        console.error("Missing compliance report in result:", result);
+        showError('خطأ في عرض التقرير: البيانات مفقودة');
         return;
     }
 
@@ -245,7 +411,7 @@ function displayReport(result) {
         </div>
         ` : ''}
 
-        ${/* Ambiguities / Missing Standards */ report.ambiguities && report.ambiguities.length > 0 ? `
+        ${/* Ambiguities */ report.ambiguities && report.ambiguities.length > 0 ? `
         <div class="section">
             <div class="section-title">
                 <i class="fas fa-question-circle"></i> معايير مفقودة
@@ -261,19 +427,6 @@ function displayReport(result) {
                         <p><strong>الوصف:</strong> ${amb.description}</p>
                         <p><strong>النص المقترح:</strong> "${amb.suggested_text}"</p>
                     </div>
-                </div>
-            `).join('')}
-        </div>
-        ` : ''}
-
-        ${/* Recommendations */ report.recommendations && report.recommendations.length > 0 ? `
-        <div class="section">
-            <div class="section-title">
-                <i class="fas fa-lightbulb"></i> توصيات عامة
-            </div>
-            ${report.recommendations.map(rec => `
-                <div class="item">
-                    <div class="item-content">• ${rec}</div>
                 </div>
             `).join('')}
         </div>
@@ -299,7 +452,7 @@ function displayReport(result) {
 
                 ${result.improved_policy.improvements_made && result.improved_policy.improvements_made.length > 0 ? `
                 <div class="improvements-list">
-                    <h4><i class="fas fa-tools"></i> التحسينات المطبقة (${result.improved_policy.improvements_made.length})</h4>
+                    <h4><i class="fas fa-tools"></i> التحسينات المطبقة</h4>
                     ${result.improved_policy.improvements_made.map((imp, idx) => `
                         <div class="improvement-item">
                             <div class="improvement-header">
@@ -307,41 +460,8 @@ function displayReport(result) {
                                 <span class="improvement-category">${imp.category}</span>
                             </div>
                             <div class="improvement-desc">${imp.description}</div>
-                            ${imp.before ? `
-                                <div class="before-after">
-                                    <div class="before"><strong>قبل:</strong> "${imp.before}"</div>
-                                    <div class="after"><strong>بعد:</strong> "${imp.after}"</div>
-                                </div>
-                            ` : `
-                                <div class="after-only"><strong>تم إضافة:</strong> "${imp.after}"</div>
-                            `}
                         </div>
                     `).join('')}
-                </div>
-                ` : ''}
-
-                ${result.improved_policy.compliance_enhancements && result.improved_policy.compliance_enhancements.length > 0 ? `
-                <div class="enhancements-list">
-                    <h4><i class="fas fa-check-double"></i> تحسينات الامتثال</h4>
-                    ${result.improved_policy.compliance_enhancements.map(enh => `
-                        <div class="enhancement-item">• ${enh}</div>
-                    `).join('')}
-                </div>
-                ` : ''}
-
-                ${result.improved_policy.key_additions && result.improved_policy.key_additions.length > 0 ? `
-                <div class="additions-list">
-                    <h4><i class="fas fa-plus-circle"></i> إضافات رئيسية</h4>
-                    ${result.improved_policy.key_additions.map(add => `
-                        <div class="addition-item">✓ ${add}</div>
-                    `).join('')}
-                </div>
-                ` : ''}
-
-                ${result.improved_policy.notes ? `
-                <div class="notes-box">
-                    <h4><i class="fas fa-sticky-note"></i> ملاحظات</h4>
-                    <p>${result.improved_policy.notes}</p>
                 </div>
                 ` : ''}
             </div>
@@ -363,7 +483,7 @@ function displayReport(result) {
 }
 
 // ==========================================
-//  3. UI Helper Functions & Dialogs
+//  4. UI Helper Functions & Dialogs
 // ==========================================
 
 function showCacheConfirmDialog(cachedResult, cacheTimestamp, data) {
@@ -402,7 +522,6 @@ function showCacheConfirmDialog(cachedResult, cacheTimestamp, data) {
                 <i class="fas fa-check-circle"></i>
                 <div><strong>الامتثال:</strong><br>${complianceRatio}%</div>
             </div>
-            <p class="cache-note"><i class="fas fa-lightbulb"></i> النتيجة المحفوظة جاهزة فوراً</p>
         </div>
         <div class="cache-dialog-footer">
             <button class="btn btn-primary" id="useCacheBtn">
@@ -428,20 +547,7 @@ function showCacheConfirmDialog(cachedResult, cacheTimestamp, data) {
     document.getElementById('newAnalysisBtn').addEventListener('click', () => {
         overlay.remove();
         showInfo('🔄 جاري إجراء تحليل جديد...');
-        
-        // Re-submit with header injection? No, we just re-trigger submit with a force refresh flag logic ideally,
-        // but for now, we just dispatch submit again.
-        // To force refresh, ideally add a hidden input or modify the logic.
-        // Assuming your backend handles forced refresh via header, we would need to pass that.
-        // For simplicity here, we just re-trigger the form.
-        
-        // To truly force refresh, we should ideally set a flag:
-        // const headers = { 'X-Force-Refresh': 'true' ... } in the main submit logic.
-        // But re-triggering is usually enough if the idempotency key logic allows overwrite or we clear it.
-        
-        // Let's clear the key to force a new one, or rely on API to handle updates.
         currentIdempotencyKey = null; 
-        
         const form = document.getElementById('analysisForm');
         const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
         form.dispatchEvent(submitEvent);
@@ -449,15 +555,23 @@ function showCacheConfirmDialog(cachedResult, cacheTimestamp, data) {
 }
 
 function setFormState(disabled) {
-    isProcessing = disabled;
-    const analyzeBtn = document.getElementById('analyzeBtn');
-    document.querySelectorAll('#analysisForm input, #analysisForm select, #analysisForm textarea')
-        .forEach(input => input.disabled = disabled);
-    
-    analyzeBtn.disabled = disabled;
-    analyzeBtn.innerHTML = disabled 
-        ? '<i class="fas fa-spinner fa-spin"></i> جاري التحليل...' 
-        : '<i class="fas fa-search"></i> تحليل السياسة';
+  isProcessing = disabled;
+  const analyzeBtn = document.getElementById('analyzeBtn');
+  document.querySelectorAll('#analysisForm input, #analysisForm select, #analysisForm textarea')
+      .forEach(input => input.disabled = disabled);
+  
+  analyzeBtn.disabled = disabled;
+  analyzeBtn.innerHTML = disabled 
+      ? '<i class="fas fa-spinner fa-spin"></i> جاري التحليل...' 
+      : '<i class="fas fa-search"></i> تحليل السياسة';
+}
+
+function showInfo(message) {
+    const n = document.createElement('div');
+    n.className = 'info-notification';
+    n.innerHTML = `<i class="fas fa-info-circle"></i> <strong>${message}</strong>`;
+    document.body.appendChild(n);
+    setTimeout(() => { n.remove() }, 3000);
 }
 
 function showSuccess(message) {
@@ -476,18 +590,10 @@ function showWarning(message) {
     setTimeout(() => { n.remove() }, 4000);
 }
 
-function showInfo(message) {
-    const n = document.createElement('div');
-    n.className = 'info-notification';
-    n.innerHTML = `<i class="fas fa-info-circle"></i> <strong>${message}</strong>`;
-    document.body.appendChild(n);
-    setTimeout(() => { n.remove() }, 3000);
-}
-
-function showError(message) {
-    const errorDiv = document.getElementById('errorMessage');
-    errorDiv.innerHTML = message.replace(/\n/g, '<br>');
-    errorDiv.style.display = 'block';
+function showError(msg) {
+  const errorDiv = document.getElementById('errorMessage');
+  errorDiv.innerHTML = `<div class="error-simple"><i class="fas fa-exclamation-circle"></i> ${msg}</div>`;
+  errorDiv.style.display = 'block';
 }
 
 function exportReport() {

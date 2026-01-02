@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 from enum import Enum
+# نقوم باستيراد input_sanitizer داخل الدوال لتجنب Circular Import إذا كان safeguards يستورد models
 
 class PolicyType(str, Enum):
     RETURN_EXCHANGE = "سياسات الاسترجاع و الاستبدال"
@@ -17,11 +18,13 @@ class PolicyAnalysisRequest(BaseModel):
     @classmethod
     def validate_shop_name(cls, v: str) -> str:
         """التحقق من اسم المتجر"""
-        # إزالة المسافات الزائدة
-        v = ' '.join(v.split())
+        from app.safeguards import input_sanitizer
         
-        # فحص الأحرف الخاصة المشبوهة
-        suspicious_chars = ['<', '>', '{', '}', '[', ']', '\\', '|']
+        # استخدام دالة التنظيف الموحدة
+        v = input_sanitizer.sanitize_text(v)
+        
+        # فحص الأحرف الخاصة المشبوهة (XSS prevention basic)
+        suspicious_chars = ['<', '>', '{', '}', '[', ']', '\\', '|', ';']
         if any(char in v for char in suspicious_chars):
             raise ValueError("اسم المتجر يحتوي على أحرف غير مسموحة")
         
@@ -31,9 +34,12 @@ class PolicyAnalysisRequest(BaseModel):
     @classmethod
     def validate_specialization(cls, v: str) -> str:
         """التحقق من تخصص المتجر"""
-        v = ' '.join(v.split())
+        from app.safeguards import input_sanitizer
         
-        suspicious_chars = ['<', '>', '{', '}', '[', ']', '\\', '|']
+        # استخدام دالة التنظيف الموحدة
+        v = input_sanitizer.sanitize_text(v)
+        
+        suspicious_chars = ['<', '>', '{', '}', '[', ']', '\\', '|', ';']
         if any(char in v for char in suspicious_chars):
             raise ValueError("تخصص المتجر يحتوي على أحرف غير مسموحة")
         
@@ -43,25 +49,27 @@ class PolicyAnalysisRequest(BaseModel):
     @classmethod
     def validate_policy_text(cls, v: str) -> str:
         """التحقق من نص السياسة"""
+        # استيراد محلي لتجنب Circular Import
         from app.safeguards import input_sanitizer, content_filter
         
-        # تنظيف النص
+        # 1. تنظيف النص
         v = input_sanitizer.sanitize_text(v)
         
-        # فحص المحتوى المشبوه
+        # 2. فحص المحتوى المشبوه (XSS, Injection)
         is_safe, reason = input_sanitizer.check_suspicious_content(v)
         if not is_safe:
+            # الرسالة هنا ستظهر في الـ Frontend بفضل التعديل الأخير في app.js
             raise ValueError(f"نص السياسة يحتوي على محتوى مشبوه: {reason}")
         
-        # فحص المحتوى المحظور
+        # 3. فحص المحتوى المحظور (Keywords)
         is_blocked, reason = content_filter.contains_blocked_content(v)
         if is_blocked:
-            raise ValueError(f"نص السياسة يحتوي على محتوى محظور")
+            raise ValueError(f"نص السياسة يحتوي على محتوى محظور: {reason}")
         
-        # فحص التكرار المفرط
+        # 4. فحص التكرار المفرط (Spam)
         is_valid, reason = content_filter.check_repetitive_content(v)
         if not is_valid:
-            raise ValueError(f"نص السياسة يحتوي على تكرار مفرط")
+            raise ValueError(f"نص السياسة يحتوي على تكرار مفرط للنصوص (Spam)")
         
         return v
 
@@ -74,6 +82,8 @@ class PolicyAnalysisRequest(BaseModel):
                 "policy_text": "يحق للعميل إرجاع المنتج خلال 7 أيام من تاريخ الاستلام..."
             }
         }
+
+# --- باقي الموديلات كما هي، مع تعديل AnalysisResponse ---
 
 class CriticalIssue(BaseModel):
     phrase: str = Field(..., description="العبارة المخالفة")
@@ -136,12 +146,13 @@ class AnalysisResponse(BaseModel):
     message: str
     policy_match: Optional[PolicyMatchResult] = None
     compliance_report: Optional[ComplianceReport] = None
-    improved_policy: Optional[ImprovedPolicyResult] = None  # جديد
+    improved_policy: Optional[ImprovedPolicyResult] = None
     shop_name: str
     shop_specialization: str
     policy_type: PolicyType
     analysis_timestamp: str
-
+    # تمت إضافة هذا الحقل ليتوافق مع tasks.py في حالة وجود تحذيرات غير حرجة
+    warnings: Optional[List[str]] = Field(default=None, description="تحذيرات النظام") 
 
 class ComplianceEnhancement(BaseModel):
     before_ratio: float = Field(..., ge=0, le=100)
