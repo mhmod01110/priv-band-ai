@@ -1,6 +1,6 @@
 /**
- * Task Monitoring using Server-Sent Events (SSE)
- * Zero polling overhead, Real-time updates with stage-by-stage tracking.
+ * Task Monitoring with Enhanced Error Parsing
+ * Handles all error types: validation, stage failures, missing data, network issues
  */
 
 class TaskMonitor {
@@ -13,9 +13,13 @@ class TaskMonitor {
       this.completedStages = [];
       this.currentStage = null;
       this.lastProgress = null;
+      this.pendingStartTime = null;
+      this.pendingTimeout = 60000; // 60 seconds max in pending state
+      this.pendingCheckInterval = null;
+      this.lastStatusChange = Date.now();
+      this.maxIdleTime = 120000; // 2 minutes max with no progress
   }
 
-  // Stage name mapping matching the Python Stage Classes
   getStageDisplayName(current, total) {
       const stageMap = {
           0: 'المرحلة 0: التحقق الأولي والقواعد (Validation)',
@@ -32,21 +36,20 @@ class TaskMonitor {
   start() {
       console.log(`📡 Connecting to SSE stream for: ${this.taskId.substring(0, 30)}...`);
       
-      // Open the persistent connection
       this.eventSource = new EventSource(`http://localhost:8000/api/task/${this.taskId}/stream`);
+      
+      // Start timeout checker
+      this.startTimeoutChecker();
 
-      // Handle incoming messages
       this.eventSource.onmessage = (event) => {
           try {
               const data = JSON.parse(event.data);
               this.handleUpdate(data);
           } catch (e) {
               console.error("❌ Error parsing SSE data:", e);
-              // Don't kill the stream immediately on one parse error, but warn
           }
       };
 
-      // Handle connection errors
       this.eventSource.onerror = (err) => {
           console.error("❌ SSE Connection Error:", err);
           
@@ -54,7 +57,6 @@ class TaskMonitor {
               console.log("✅ Stream closed normally");
           } else {
               this.stop();
-              // Pass a generic object, not just a string
               this.onError({
                   message: "فقد الاتصال بالخادم",
                   details: "يرجى التحقق من الاتصال بالإنترنت والمحاولة مرة أخرى.",
@@ -63,13 +65,53 @@ class TaskMonitor {
           }
       };
   }
+  
+  startTimeoutChecker() {
+      // Check every 5 seconds
+      this.pendingCheckInterval = setInterval(() => {
+          const now = Date.now();
+          
+          // Check if stuck in pending
+          if (this.pendingStartTime && (now - this.pendingStartTime) > this.pendingTimeout) {
+              console.error("❌ Task stuck in pending state for too long");
+              this.stop();
+              this.onError({
+                  message: "⏱️ انتهت مهلة الانتظار",
+                  details: "المهمة عالقة في قائمة الانتظار. يبدو أن Celery Worker غير قيد التشغيل أو متوقف عن العمل.",
+                  type: "timeout",
+                  user_action: "تأكد من تشغيل Celery Worker باستخدام: celery -A celery_worker worker --loglevel=info --pool=solo"
+              });
+              return;
+          }
+          
+          // Check if no progress at all
+          if ((now - this.lastStatusChange) > this.maxIdleTime) {
+              console.error("❌ No progress for too long");
+              this.stop();
+              this.onError({
+                  message: "⏱️ توقف التقدم",
+                  details: "لم يتم تلقي أي تحديثات من الخادم لفترة طويلة.",
+                  type: "timeout"
+              });
+          }
+      }, 5000);
+  }
 
   handleUpdate(data) {
       // Handle completion
       if (data.status === 'completed') {
           console.log("✅ Task completed successfully");
-          const finalStageNum = this.lastProgress?.total || 5;
+          this.lastStatusChange = Date.now();
+          
+          // Check if result contains validation error
+          if (data.result && data.result.result && data.result.result.error_type === 'validation_error') {
+              console.log("🚫 Validation error in completed task");
+              this.onError(this.parseValidationError(data.result.result));
+              this.stop();
+              return;
+          }
 
+          const finalStageNum = this.lastProgress?.total || 5;
           const finalProgress = {
               current: finalStageNum,
               total: finalStageNum,
@@ -82,23 +124,32 @@ class TaskMonitor {
           this.onComplete(data);
           this.stop();
           return;
-      } 
+      }
       
       // Handle failure
       if (data.status === 'failed') {
           console.error("❌ Task failed raw:", data.error);
+          this.lastStatusChange = Date.now();
           const errorDetails = this.parseErrorDetails(data.error);
           this.onError(errorDetails);
           this.stop();
           return;
-      } 
+      }
       
-      // Handle pending state
+      // Handle pending
       if (data.status === 'pending') {
+          // Track when pending state started
+          if (!this.pendingStartTime) {
+              this.pendingStartTime = Date.now();
+              console.log("⏳ Task entered pending state, starting timeout monitoring");
+          }
+          
+          const pendingDuration = Math.floor((Date.now() - this.pendingStartTime) / 1000);
+          
           this.onUpdate({
               current: 0,
               total: 5,
-              status: '⏳ في انتظار المعالجة...',
+              status: `⏳ في انتظار المعالجة... (${pendingDuration}s)`,
               stageDetails: [],
               message: 'تم إرسال الطلب بنجاح. في انتظار بدء المعالجة.'
           });
@@ -107,12 +158,15 @@ class TaskMonitor {
       
       // Handle processing
       if (data.status === 'processing' && data.progress) {
+          // Reset pending timer since we're now processing
+          this.pendingStartTime = null;
+          this.lastStatusChange = Date.now();
+          
           const progress = data.progress;
           
           // Track stage completion
           if (this.lastProgress && progress.current > this.lastProgress.current) {
               const finishedStage = this.lastProgress.current;
-              // Avoid duplicates
               if (!this.completedStages.find(s => s.stage === finishedStage)) {
                   this.completedStages.push({
                       stage: finishedStage,
@@ -140,14 +194,29 @@ class TaskMonitor {
   }
 
   /**
-   * Robust Error Parsing Logic
-   * handles strings, JSON objects, and Python-like string representations
+   * Parse validation errors (pre-stage errors)
+   */
+  parseValidationError(error) {
+      return {
+          message: error.message || 'خطأ في التحقق من البيانات',
+          details: error.details || null,
+          type: 'validation_error',
+          error_category: error.error_category || 'unknown',
+          user_action: error.user_action || null,
+          stage: 'pre_validation',
+          completedStages: [],
+          rawError: JSON.stringify(error)
+      };
+  }
+
+  /**
+   * Parse stage execution errors
    */
   parseErrorDetails(error) {
       let errorStr = '';
       let errorObj = {};
 
-      // 1. Normalize input to string for regex matching
+      // Normalize to string
       if (typeof error === 'string') {
           errorStr = error;
       } else if (typeof error === 'object') {
@@ -161,50 +230,68 @@ class TaskMonitor {
       let errorType = 'unknown';
       let failedStage = this.currentStage || 'غير محدد';
 
-      // --- Error Classification Strategy ---
+      // Error Classification Strategy
 
-      // 1. Quota / Rate Limits (429)
-      if (errorLower.includes('quota') || errorLower.includes('429') || errorLower.includes('rate limit') || errorLower.includes('insufficient_quota')) {
+      // 1. Validation errors (should be rare here, but handle anyway)
+      if (errorObj.error_type === 'validation_error' || errorLower.includes('validation')) {
+          return this.parseValidationError(errorObj);
+      }
+
+      // 2. Quota / Rate Limits
+      if (errorLower.includes('quota') || errorLower.includes('429') || 
+          errorLower.includes('rate limit') || errorLower.includes('insufficient_quota')) {
           errorType = 'quota_exceeded';
           userMessage = '⚠️ تم تجاوز الحد المسموح من الطلبات';
-          technicalDetails = 'تم استنفاد حصة التوكنز لدى مزود الذكاء الاصطناعي (OpenAI/Gemini). يرجى المحاولة لاحقاً.';
+          technicalDetails = 'تم استنفاد حصة التوكنز لدى مزود الذكاء الاصطناعي. يرجى المحاولة لاحقاً.';
       }
-      // 2. Timeouts
-      else if (errorLower.includes('timeout') || errorLower.includes('timed out') || errorLower.includes('deadline')) {
+      // 3. Timeouts
+      else if (errorLower.includes('timeout') || errorLower.includes('timed out') || 
+               errorLower.includes('deadline')) {
           errorType = 'timeout';
           userMessage = '⏱️ انتهت مهلة الانتظار';
           technicalDetails = 'استغرق التحليل وقتاً أطول من المتوقع. الخادم مشغول جداً حالياً.';
       }
-      // 3. Authentication / API Keys
-      else if (errorLower.includes('401') || errorLower.includes('403') || errorLower.includes('auth') || errorLower.includes('api key')) {
+      // 4. Authentication
+      else if (errorLower.includes('401') || errorLower.includes('403') || 
+               errorLower.includes('auth') || errorLower.includes('api key')) {
           errorType = 'authentication';
           userMessage = '🔐 خطأ في المصادقة';
           technicalDetails = 'هناك مشكلة في مفاتيح الربط مع مزود الخدمة.';
       }
-      // 4. Server Errors (500s)
-      else if (errorLower.includes('500') || errorLower.includes('502') || errorLower.includes('bad gateway')) {
+      // 5. Server Errors
+      else if (errorLower.includes('500') || errorLower.includes('502') || 
+               errorLower.includes('bad gateway')) {
           errorType = 'server_error';
           userMessage = '🔥 خطأ في الخادم';
           technicalDetails = 'حدث خطأ داخلي في الخادم. يرجى المحاولة مرة أخرى.';
       }
-      // 5. Network / Connection
-      else if (errorLower.includes('network') || errorLower.includes('connection') || errorLower.includes('fetch')) {
+      // 6. Network / Connection
+      else if (errorLower.includes('network') || errorLower.includes('connection') || 
+               errorLower.includes('fetch')) {
           errorType = 'network';
           userMessage = '🌐 خطأ في الاتصال';
           technicalDetails = 'فشل الاتصال بالخادم. تأكد من اتصالك بالإنترنت.';
       }
-      // 6. Stage Failures
-      else if (errorLower.includes('stage')) {
-          const stageMatch = errorStr.match(/stage[_\s]?(\d)/i);
+      // 7. Missing compliance report
+      else if (errorLower.includes('compliance') || errorLower.includes('مفقودة') || 
+               errorLower.includes('missing')) {
+          errorType = 'missing_data';
+          userMessage = '📊 بيانات التقرير مفقودة';
+          technicalDetails = 'فشل إنشاء تقرير الامتثال. قد يكون هناك خطأ في المعالجة.';
+      }
+      // 8. Stage-specific failures
+      else if (errorLower.includes('stage') || errorLower.includes('مرحلة')) {
+          const stageMatch = errorStr.match(/stage[_\s]?(\d)/i) || errorStr.match(/مرحلة[_\s]?(\d)/i);
           if (stageMatch) {
               failedStage = parseInt(stageMatch[1]);
               userMessage = `❌ فشل في ${this.getStageDisplayName(failedStage, 5)}`;
+              technicalDetails = errorStr;
           }
       }
 
-      // Cleanup extremely long raw error messages for display
-      if (userMessage.length > 100 && !technicalDetails) {
-          technicalDetails = userMessage; // Move long text to details
+      // Cleanup long messages
+      if (userMessage.length > 150 && !technicalDetails) {
+          technicalDetails = userMessage;
           userMessage = "حدث خطأ أثناء المعالجة";
       }
 
@@ -224,10 +311,18 @@ class TaskMonitor {
           this.eventSource = null;
           console.log("🛑 EventSource connection closed");
       }
+      
+      if (this.pendingCheckInterval) {
+          clearInterval(this.pendingCheckInterval);
+          this.pendingCheckInterval = null;
+          console.log("🛑 Timeout checker stopped");
+      }
   }
 }
 
-// Progress UI Helper
+/**
+* Progress Bar UI Helper
+*/
 class ProgressBar {
   constructor(containerId) {
       this.container = document.getElementById(containerId);
@@ -257,36 +352,50 @@ class ProgressBar {
       const current = progress.current || 0;
       const percentage = Math.round((current / total) * 100);
 
-      document.getElementById('progressStatus').textContent = progress.status || 'جاري المعالجة...';
-      document.getElementById('progressPercentage').textContent = `${percentage}%`;
-      document.getElementById('progressBar').style.width = `${percentage}%`;
-      document.getElementById('progressStep').textContent = `المرحلة ${current} من ${total}`;
+      const statusEl = document.getElementById('progressStatus');
+      const percentageEl = document.getElementById('progressPercentage');
+      const barEl = document.getElementById('progressBar');
+      const stepEl = document.getElementById('progressStep');
+      const noteEl = document.getElementById('progressNote');
+
+      if (statusEl) statusEl.textContent = progress.status || 'جاري المعالجة...';
+      if (percentageEl) percentageEl.textContent = `${percentage}%`;
+      if (barEl) barEl.style.width = `${percentage}%`;
+      if (stepEl) stepEl.textContent = `المرحلة ${current} من ${total}`;
       
-      if (current === 0) {
-          document.getElementById('progressBar').style.background = '#3498db';
+      if (current === 0 && barEl) {
+          barEl.style.background = '#3498db';
       }
       
       // Warning about Worker
-      if (current === 0 && progress.status && progress.status.includes('تأكد من تشغيل')) {
-          document.getElementById('progressNote').innerHTML = 
+      if (current === 0 && progress.status && progress.status.includes('تأكد من تشغيل') && noteEl) {
+          noteEl.innerHTML = 
               '⚠️ يبدو أن Worker غير قيد التشغيل.<br>' +
               '<code>celery -A celery_worker worker --loglevel=info --pool=solo</code>';
+      } else if (noteEl) {
+          noteEl.textContent = '';
       }
   }
 
   complete() {
-      document.getElementById('progressStatus').textContent = '✅ اكتملت العملية!';
-      document.getElementById('progressPercentage').textContent = '100%';
-      document.getElementById('progressBar').style.width = '100%';
-      document.getElementById('progressBar').style.background = 'linear-gradient(135deg, #27ae60 0%, #2ecc71 100%)';
-      document.getElementById('progressNote').textContent = '';
+      const statusEl = document.getElementById('progressStatus');
+      const percentageEl = document.getElementById('progressPercentage');
+      const barEl = document.getElementById('progressBar');
+      const noteEl = document.getElementById('progressNote');
+
+      if (statusEl) statusEl.textContent = '✅ اكتملت العملية!';
+      if (percentageEl) percentageEl.textContent = '100%';
+      if (barEl) {
+          barEl.style.width = '100%';
+          barEl.style.background = 'linear-gradient(135deg, #27ae60 0%, #2ecc71 100%)';
+      }
+      if (noteEl) noteEl.textContent = '';
   }
 
-  // UPDATED: Robust error handling method
   error(input) {
       let message = "حدث خطأ غير معروف";
       
-      // Safely extract message regardless of input type
+      // Safely extract message
       if (typeof input === 'string') {
           message = input;
       } else if (input && typeof input === 'object') {
@@ -301,7 +410,6 @@ class ProgressBar {
       if (barEl) barEl.style.background = 'linear-gradient(135deg, #c0392b 0%, #e74c3c 100%)';
       
       if (noteEl) {
-          // Safe HTML injection
           noteEl.innerHTML = message.replace(/\n/g, '<br>');
           noteEl.style.color = '#c0392b';
           noteEl.style.fontWeight = 'bold';
@@ -313,5 +421,6 @@ class ProgressBar {
   }
 }
 
+// Export to global scope
 window.TaskMonitor = TaskMonitor;
 window.ProgressBar = ProgressBar;

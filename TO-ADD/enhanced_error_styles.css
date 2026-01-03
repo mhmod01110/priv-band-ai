@@ -1,0 +1,423 @@
+/* ================================================
+   Enhanced Error Display Styles
+   Professional, user-friendly error messages
+   ================================================ */
+
+/* Base Error Box Styling */
+.error-box {
+    animation: slideInDown 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    margin-bottom: 30px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+    transition: all 0.3s ease;
+}
+
+.error-box:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 15px 50px rgba(0, 0, 0, 0.2);
+}
+
+/* Validation Error Specific Styling */
+.validation-error {
+    border-width: 2px !important;
+    position: relative;
+    overflow: hidden;
+}
+
+.validation-error::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 5px;
+    background: linear-gradient(90deg, #e67e22, #f39c12, #e67e22);
+    background-size: 200% 100%;
+    animation: shimmer 3s linear infinite;
+}
+
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+/* Error Icon Pulse Animation */
+.error-box i {
+    animation: iconPulse 2s ease-in-out infinite;
+}
+
+@keyframes iconPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.05); opacity: 0.9; }
+}
+
+/* Error Content Styling */
+.error-box h3 {
+    font-family: 'Georgia', 'Times New Roman', serif;
+    letter-spacing: 0.5px;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.error-box .item-content {
+    line-height: 1.8;
+}
+
+/* Info Boxes Inside Errors */
+.error-box [style*="background: white"] {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    transition: all 0.3s ease;
+}
+
+.error-box [style*="background: white"]:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Action Guidance Boxes */
+.error-box [style*="border-left: 4px solid"] {
+    transition: all 0.3s ease;
+}
+
+.error-box [style*="border-left: 4px solid"]:hover {
+    padding-left: 20px;
+    transform: translateX(-5px);
+}
+
+/* Completed Stages Badges */
+.error-box span[style*="background: #d4edda"] {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: all 0.2s ease;
+    cursor: default;
+}
+
+.error-box span[style*="background: #d4edda"]:hover {
+    transform: scale(1.05);
+    box-shadow: 0 2px 8px rgba(39, 174, 96, 0.3);
+}
+
+/* Button Styling in Error Box */
+.error-box .btn {
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.error-box .btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Slide In Animation */
+@keyframes slideInDown {
+    from {
+        opacity: 0;
+        transform: translateY(-30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Error Message Container */
+#errorMessage {
+    margin-top: 20px;
+    animation: fadeIn 0.4s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Specific Error Type Colors */
+.quota-error {
+    border-color: #9b59b6 !important;
+    background: linear-gradient(135deg, #f5f0f7 0%, #fff 100%) !important;
+}
+
+.timeout-error {
+    border-color: #3498db !important;
+    background: linear-gradient(135deg, #f0f7fc 0%, #fff 100%) !important;
+}
+
+.auth-error {
+    border-color: #e74c3c !important;
+    background: linear-gradient(135deg, #fef5f5 0%, #fff 100%) !important;
+}
+
+.network-error {
+    border-color: #16a085 !important;
+    background: linear-gradient(135deg, #f0faf8 0%, #fff 100%) !important;
+}
+
+/* Code Blocks in Errors */
+.error-box code {
+    background: #2c3e50;
+    color: #ecf0f1;
+    padding: 10px 15px;
+    border-radius: 6px;
+    display: block;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    margin: 10px 0;
+    overflow-x: auto;
+}
+
+/* Warning Boxes */
+.error-box [style*="background: #fff3cd"] {
+    box-shadow: 0 2px 8px rgba(243, 156, 18, 0.15);
+}
+
+/* Success Indicators */
+.error-box [style*="color: #27ae60"] {
+    font-weight: 600;
+}
+
+/* Responsive Adjustments */
+@media (max-width: 768px) {
+    .error-box {
+        padding: 20px !important;
+    }
+    
+    .error-box h3 {
+        font-size: 1.2em !important;
+    }
+    
+    .error-box [style*="font-size: 3em"] {
+        font-size: 2.5em !important;
+    }
+    
+    .error-box [style*="display: flex"] {
+        flex-direction: column !important;
+        gap: 15px !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .error-box {
+        padding: 15px !important;
+        border-radius: 8px !important;
+    }
+    
+    .error-box h3 {
+        font-size: 1.1em !important;
+    }
+    
+    .error-box [style*="font-size: 3em"] {
+        font-size: 2em !important;
+    }
+    
+    .error-box span[style*="background: #d4edda"] {
+        font-size: 0.8em !important;
+        padding: 4px 8px !important;
+    }
+}
+
+/* Print Styles */
+@media print {
+    .error-box {
+        page-break-inside: avoid;
+        border: 2px solid #333 !important;
+        box-shadow: none !important;
+    }
+    
+    .error-box::before {
+        display: none;
+    }
+    
+    .error-box i {
+        animation: none;
+    }
+}
+
+/* Dark Mode Support (Optional) */
+@media (prefers-color-scheme: dark) {
+    .error-box {
+        background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%) !important;
+        border-color: #e67e22 !important;
+        color: #ecf0f1 !important;
+    }
+    
+    .error-box h3 {
+        color: #f39c12 !important;
+    }
+    
+    .error-box [style*="background: white"] {
+        background: #2c3e50 !important;
+        color: #ecf0f1 !important;
+    }
+}
+
+/* Accessibility Enhancements */
+.error-box:focus-within {
+    outline: 3px solid #e67e22;
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .error-box,
+    .error-box i,
+    .error-box *,
+    .validation-error::before {
+        animation: none !important;
+        transition: none !important;
+    }
+}
+
+/* High Contrast Mode */
+@media (prefers-contrast: high) {
+    .error-box {
+        border-width: 3px !important;
+        border-color: currentColor !important;
+    }
+    
+    .error-box h3 {
+        text-shadow: none !important;
+    }
+}
+
+/* Loading State for Error Box */
+.error-box.loading {
+    opacity: 0.6;
+    pointer-events: none;
+    position: relative;
+}
+
+.error-box.loading::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 40px;
+    height: 40px;
+    border: 4px solid rgba(0, 0, 0, 0.1);
+    border-top-color: #e67e22;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    100% { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+/* Tooltip for Technical Details */
+.error-box [title] {
+    cursor: help;
+    border-bottom: 1px dotted currentColor;
+}
+
+/* Success Recovery Message */
+.error-box .recovery-success {
+    background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+    border-left: 4px solid #27ae60;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 15px;
+    animation: slideInUp 0.4s ease;
+}
+
+@keyframes slideInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Error Category Badges */
+.error-category-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    font-weight: 600;
+    margin-left: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.error-category-badge.length {
+    background: #3498db;
+    color: white;
+}
+
+.error-category-badge.suspicious {
+    background: #e67e22;
+    color: white;
+}
+
+.error-category-badge.blocked {
+    background: #e74c3c;
+    color: white;
+}
+
+.error-category-badge.spam {
+    background: #95a5a6;
+    color: white;
+}
+
+/* Interactive Help Icons */
+.error-box .help-icon {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    line-height: 20px;
+    text-align: center;
+    background: #3498db;
+    color: white;
+    border-radius: 50%;
+    font-size: 12px;
+    margin-left: 5px;
+    cursor: help;
+    transition: all 0.2s ease;
+}
+
+.error-box .help-icon:hover {
+    background: #2980b9;
+    transform: scale(1.1);
+}
+
+/* Copy Error Details Button */
+.error-box .copy-error-btn {
+    background: transparent;
+    border: 1px solid currentColor;
+    color: inherit;
+    padding: 5px 10px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-top: 10px;
+}
+
+.error-box .copy-error-btn:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+/* Expandable Technical Details */
+.error-box .technical-details {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+}
+
+.error-box .technical-details.expanded {
+    max-height: 500px;
+}
+
+.error-box .expand-toggle {
+    cursor: pointer;
+    color: #3498db;
+    text-decoration: underline;
+    font-size: 0.9em;
+    margin-top: 10px;
+    display: inline-block;
+}
+
+.error-box .expand-toggle:hover {
+    color: #2980b9;
+}

@@ -8,7 +8,6 @@ let currentReport = null;
 let currentIdempotencyKey = null;
 let currentTaskMonitor = null;
 let isProcessing = false;
-let forceRefresh = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('loading').style.display = 'none';
@@ -52,21 +51,7 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
 
     try {
         const headers = { 'Content-Type': 'application/json' };
-        
-        if (forceRefresh) {
-            // When forcing refresh, send the key so backend knows which cache to delete
-            if (currentIdempotencyKey) {
-                headers['X-Idempotency-Key'] = currentIdempotencyKey;
-            }
-            headers['X-Force-Refresh'] = 'true';
-            console.log('🔄 Force refresh enabled - sending X-Force-Refresh header');
-            forceRefresh = false; // Reset after use
-            currentIdempotencyKey = null; // Clear so next submission generates fresh key
-        }
-        // Otherwise, don't send key - let backend generate from request data
-        // This ensures consistent cache behavior
-        
-        console.log('📤 Request headers:', headers);
+        if (currentIdempotencyKey) headers['X-Idempotency-Key'] = currentIdempotencyKey;
 
         showInfo('📤 جاري إرسال الطلب...');
 
@@ -78,28 +63,15 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            
-            // Handle Pydantic validation errors (422)
-            if (response.status === 422 && errorData.detail && Array.isArray(errorData.detail)) {
-                const errors = errorData.detail.map(err => {
-                    const field = err.loc ? err.loc.join(' > ') : 'unknown';
-                    return `${field}: ${err.msg}`;
-                }).join('\n');
-                
-                throw new Error(errors);
-            }
-            
             throw new Error(errorData.detail || errorData.message || `Server Error: ${response.status}`);
         }
 
         const result = await response.json();
-        console.log('📦 Received response:', result);
-        
         if (result.idempotency_key) currentIdempotencyKey = result.idempotency_key;
 
         // Handle immediate results (cache or validation error)
         if (result.status === 'completed') {
-            console.log('✅ Immediate result received (from_cache:', result.from_cache, ')');
+            console.log('✅ Immediate result received');
             progressBar.complete();
             setTimeout(() => {
                 document.getElementById('loading').style.display = 'none';
@@ -111,7 +83,7 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
 
         // Handle async task via SSE
         if (result.status === 'pending') {
-            console.log('🚀 Starting SSE monitoring for task:', result.task_id);
+            console.log('🚀 Starting SSE monitoring');
             showInfo('✅ تم الاستلام. جاري بدء التحليل...');
             
             currentTaskMonitor = new TaskMonitor(
@@ -124,17 +96,7 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
                     }, 1000);
                 },
                 (errorDetails) => {
-                    console.error("❌ SSE Task Error Received:");
-                    console.error("   Type:", errorDetails.type);
-                    console.error("   Message:", errorDetails.message);
-                    console.error("   Details:", errorDetails.details);
-                    if (errorDetails.failedStage) {
-                        console.error("   Failed Stage:", errorDetails.failedStage);
-                    }
-                    if (errorDetails.completedStages?.length > 0) {
-                        console.error("   Completed Stages:", errorDetails.completedStages.length);
-                    }
-                    
+                    console.error("❌ App Level Error:", errorDetails);
                     progressBar.error(errorDetails);
                     setTimeout(() => {
                         document.getElementById('loading').style.display = 'none';
@@ -150,11 +112,6 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
 
     } catch (error) {
         console.error('❌ Request Error:', error);
-        console.error('❌ Error details:', {
-            message: error.message,
-            stack: error.stack
-        });
-        
         document.getElementById('loading').style.display = 'none';
         
         const errorStruct = {
@@ -164,12 +121,6 @@ document.getElementById('analysisForm').addEventListener('submit', async (e) => 
         };
         showStructuredError(errorStruct);
         setFormState(false);
-        
-        // Stop any running task monitor
-        if (currentTaskMonitor) {
-            currentTaskMonitor.stop();
-            currentTaskMonitor = null;
-        }
     }
 });
 
@@ -329,7 +280,6 @@ function showStructuredError(errorObj) {
     const type = errorObj.type || errorObj.error_type || "unknown";
     const stages = errorObj.completedStages || [];
     const failedStage = errorObj.failedStage || null;
-    const userAction = errorObj.user_action || null;
 
     const icons = {
         'quota_exceeded': 'fa-hand-holding-usd',
@@ -373,15 +323,6 @@ function showStructuredError(errorObj) {
                         </div>
                     ` : ''}
                     
-                    ${userAction ? `
-                        <div style="background: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #f39c12;">
-                            <div style="font-weight: bold; margin-bottom: 8px; color: #856404;">
-                                <i class="fas fa-hand-point-right"></i> الإجراء المطلوب:
-                            </div>
-                            <div style="color: #856404; line-height: 1.6; font-family: 'Courier New', monospace; font-size: 0.9em;">${userAction}</div>
-                        </div>
-                    ` : ''}
-                    
                     ${failedStage ? `
                         <div style="font-size: 0.95em; color: #7f8c8d; margin-bottom: 10px; padding: 10px; background: #ecf0f1; border-radius: 6px;">
                             <strong><i class="fas fa-times"></i> المرحلة الفاشلة:</strong> ${getStageName(failedStage)}
@@ -403,7 +344,7 @@ function showStructuredError(errorObj) {
                         </div>
                     ` : ''}
 
-                    ${!userAction ? getUserActionGuidance(type) : ''}
+                    ${getUserActionGuidance(type)}
                 </div>
             </div>
             
@@ -709,8 +650,6 @@ function handleSuccessResult(result, formData) {
     displayReport(result);
     const complianceRatio = result.compliance_report?.overall_compliance_ratio || 0;
     showSuccess(`✅ تم التحليل بنجاح! الامتثال: ${complianceRatio.toFixed(1)}%`);
-    // Clear key so next submission starts fresh
-    currentIdempotencyKey = null;
 }
 
 function getStageName(stageNum) {
@@ -801,22 +740,12 @@ function showCacheConfirmDialog(cachedResult, cacheTimestamp, data) {
         displayReport(cachedResult);
         showSuccess('✅ تم عرض النتيجة المحفوظة');
         setFormState(false);
-        // Don't keep the key - let next submission generate fresh
-        currentIdempotencyKey = null;
     });
     
     document.getElementById('newAnalysisBtn').addEventListener('click', () => {
         overlay.remove();
-        
-        // Clear previous report
-        document.getElementById('reportSection').style.display = 'none';
-        document.getElementById('errorMessage').style.display = 'none';
-        currentReport = null;
-        
         showInfo('🔄 جاري إجراء تحليل جديد...');
-        forceRefresh = true; // Set flag to bypass cache
-        // Keep currentIdempotencyKey so backend knows which cache to delete
-        
+        currentIdempotencyKey = null; 
         const form = document.getElementById('analysisForm');
         const submitEvent = new Event('submit', { bubbles: true, cancelable: true });
         form.dispatchEvent(submitEvent);

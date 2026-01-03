@@ -65,7 +65,6 @@ class IdempotencyService:
             "shop_name": request_data.get("shop_name", ""),
             "shop_specialization": request_data.get("shop_specialization", ""),
             "policy_type": request_data.get("policy_type", ""),
-            # استخدام أول 2000 حرف فقط للمقارنة
             "policy_text_hash": hashlib.sha256(
                 request_data.get("policy_text", "").encode()
             ).hexdigest()

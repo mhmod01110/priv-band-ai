@@ -49,8 +49,9 @@ async def analyze_policy_async(
     force_refresh = x_force_refresh and x_force_refresh.lower() == 'true'
     
     if force_refresh:
-        app_logger.info(f"🔄 Force refresh requested - Clearing cache")
+        app_logger.info(f"🔄 Force refresh requested - Clearing cache for key: {idempotency_key[:30]}...")
         await idempotency_service.delete_cached_result(idempotency_key)
+        app_logger.info(f"✅ Cache cleared")
     
     # Check cache first (quick response)
     if not force_refresh:
@@ -63,9 +64,21 @@ async def analyze_policy_async(
                 "result": cached_result,
                 "idempotency_key": idempotency_key
             }
+        app_logger.info(f"ℹ️ Cache MISS - Will submit new task")
+    else:
+        app_logger.info(f"🔄 Force refresh active - Skipping cache check")
     
     # Submit task to Celery
     app_logger.info(f"🚀 Submitting task to Celery - Key: {idempotency_key[:30]}...")
+    
+    # When force_refresh, use a unique task_id to avoid Celery's cached result
+    # Otherwise, reuse idempotency_key as task_id for deduplication
+    if force_refresh:
+        import time
+        task_id = f"{idempotency_key}_refresh_{int(time.time() * 1000)}"
+        app_logger.info(f"🔄 Force refresh: Using unique task_id to bypass Celery cache")
+    else:
+        task_id = idempotency_key
     
     task = analyze_policy_task.apply_async(
         args=[
@@ -73,20 +86,26 @@ async def analyze_policy_async(
             request.shop_specialization,
             request.policy_type.value,
             request.policy_text,
-            idempotency_key
+            idempotency_key,
+            force_refresh  # Pass force_refresh flag
         ],
-        task_id=idempotency_key  # Use idempotency key as task ID
+        task_id=task_id  # Use unique ID for force refresh
     )
     
     app_logger.info(f"✅ Task submitted - ID: {task.id}")
     
-    return {
+    response = {
         "status": "pending",
         "task_id": task.id,
         "message": "تم إرسال الطلب للمعالجة",
         "idempotency_key": idempotency_key,
-        "check_status_url": f"/api/task/{task.id}"
+        "check_status_url": f"/api/task/{task.id}",
+        "force_refresh": force_refresh  # Include for debugging
     }
+    
+    app_logger.info(f"📤 Returning response: status={response['status']}, task_id={task.id[:30]}..., force_refresh={force_refresh}")
+    
+    return response
 
 
 @router.get("/task/{task_id}")

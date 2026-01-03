@@ -64,15 +64,13 @@ class AsyncTask(Task):
 class StageContext:
     """Context object to pass data between stages"""
     def __init__(self, task_instance, shop_name: str, shop_specialization: str, 
-                 policy_type: str, policy_text: str, idempotency_key: str = None,
-                 force_refresh: bool = False):
+                 policy_type: str, policy_text: str, idempotency_key: str = None):
         self.task = task_instance
         self.shop_name = shop_name
         self.shop_specialization = shop_specialization
         self.policy_type = policy_type
         self.policy_text = policy_text
         self.idempotency_key = idempotency_key
-        self.force_refresh = force_refresh  # Flag to skip graceful degradation
         self.request = PolicyAnalysisRequest(
             shop_name=shop_name,
             shop_specialization=shop_specialization,
@@ -149,34 +147,7 @@ class StageExecutor:
                 await stage.execute()
                 
                 if self.context.should_exit:
-                    exit_result = self.context.exit_result
-                    
-                    # Check if the exit result is actually a failure
-                    if exit_result and isinstance(exit_result, dict):
-                        nested_result = exit_result.get('result', {})
-                        if isinstance(nested_result, dict) and not nested_result.get('success', True):
-                            # This is a failure result (like policy mismatch), don't cache it
-                            app_logger.warning(
-                                f"⚠️ [Task {self.context.task.request.id}] "
-                                f"Early exit with failure result - will not cache"
-                            )
-                            # Don't cache failure results
-                            return exit_result
-                    
-                    # For successful early exits (if any), cache normally
-                    if self.context.idempotency_key and exit_result:
-                        nested_result = exit_result.get('result', {})
-                        if isinstance(nested_result, dict) and nested_result.get('success', False):
-                            await idempotency_service.store_result(
-                                self.context.idempotency_key, 
-                                nested_result
-                            )
-                            app_logger.info(
-                                f"💾 [Task {self.context.task.request.id}] "
-                                f"Early exit result cached"
-                            )
-                    
-                    return exit_result
+                    return self.context.exit_result
                     
             except Exception as e:
                 error_message = str(e)
@@ -211,44 +182,20 @@ class StageExecutor:
                 
                 # Try graceful degradation for non-critical errors
                 if stage.required:
-                    # For quota/auth errors, don't try fallback - fail immediately
-                    if self.context.error_type in ['quota_exceeded', 'authentication']:
-                        app_logger.error(
-                            f"💥 [Task {self.context.task.request.id}] "
-                            f"Critical error {self.context.error_type} - no fallback attempted"
-                        )
-                        raise
-                    
-                    # If force_refresh is true, don't use cached fallback - user wants fresh analysis
-                    if self.context.force_refresh:
-                        app_logger.info(
-                            f"🔄 [Task {self.context.task.request.id}] "
-                            f"Force refresh enabled - skipping graceful degradation fallback"
-                        )
-                        raise
-                    
                     fallback_result = await graceful_degradation_service.get_cached_similar_result(
                         self.context.policy_text, self.context.policy_type
                     )
                     
                     if fallback_result:
-                        # Check if fallback is actually successful
-                        if fallback_result.get('success', False):
-                            app_logger.info(
-                                f"✨ [Task {self.context.task.request.id}] "
-                                f"Using graceful degradation fallback after {stage.name} failure"
-                            )
-                            return {
-                                'success': True,
-                                'from_cache': False,
-                                'result': fallback_result,
-                                'used_fallback': True
-                            }
-                        else:
-                            app_logger.warning(
-                                f"⚠️ [Task {self.context.task.request.id}] "
-                                f"Fallback result was also a failure - will not use it"
-                            )
+                        app_logger.info(
+                            f"✨ [Task {self.context.task.request.id}] "
+                            f"Using graceful degradation fallback after {stage.name} failure"
+                        )
+                        return {
+                            'success': True,
+                            'from_cache': False,
+                            'result': fallback_result
+                        }
                     
                     app_logger.error(
                         f"💥 [Task {self.context.task.request.id}] "
@@ -322,26 +269,14 @@ class StageExecutor:
                     f"Completed with warnings: {warnings}"
                 )
         
-        # Only cache truly successful results (success=True AND has compliance_report)
-        should_cache = (
-            result.success and 
-            self.context.compliance_report is not None and
-            self.context.compliance_report.overall_compliance_ratio is not None
-        )
-        
-        if self.context.idempotency_key and should_cache:
+        if self.context.idempotency_key and result.success:
             await idempotency_service.store_result(self.context.idempotency_key, result_dict)
             app_logger.info(
                 f"💾 [Task {self.context.task.request.id}] "
                 f"Result cached for idempotency"
             )
-        elif self.context.idempotency_key and not should_cache:
-            app_logger.info(
-                f"⏭️ [Task {self.context.task.request.id}] "
-                f"Result NOT cached (success={result.success}, has_report={self.context.compliance_report is not None})"
-            )
         
-        if should_cache:
+        if result.success:
             await graceful_degradation_service.cache_successful_result(
                 self.context.policy_text,
                 self.context.policy_type,
@@ -478,14 +413,13 @@ async def analyze_policy_task(
     shop_specialization: str,
     policy_type: str,
     policy_text: str,
-    idempotency_key: str = None,
-    force_refresh: bool = False
+    idempotency_key: str = None
 ) -> Dict[str, Any]:
     """
     Main Policy Analysis Task with Pre-Stage Validation
     """
     app_logger.info(
-        f"🚀 [Celery Task {self.request.id}] Starting analysis for: {shop_name} (force_refresh={force_refresh})"
+        f"🚀 [Celery Task {self.request.id}] Starting analysis for: {shop_name}"
     )
     
     try:
@@ -521,8 +455,8 @@ async def analyze_policy_task(
         await idempotency_service.connect()
         await graceful_degradation_service.connect()
         
-        # Check cache first (skip if force_refresh)
-        if idempotency_key and not force_refresh:
+        # Check cache first
+        if idempotency_key:
             cached_result = await idempotency_service.get_cached_result(idempotency_key)
             if cached_result:
                 app_logger.info(f"✅ [Task {self.request.id}] Cache HIT")
@@ -531,8 +465,6 @@ async def analyze_policy_task(
                     'from_cache': True,
                     'result': cached_result
                 }
-        elif force_refresh:
-            app_logger.info(f"🔄 [Task {self.request.id}] Force refresh - skipping cache check")
         
         # Create stage context
         context = StageContext(
@@ -541,8 +473,7 @@ async def analyze_policy_task(
             shop_specialization=shop_specialization,
             policy_type=policy_type,
             policy_text=policy_text,
-            idempotency_key=idempotency_key,
-            force_refresh=force_refresh
+            idempotency_key=idempotency_key
         )
         
         # Execute all stages
