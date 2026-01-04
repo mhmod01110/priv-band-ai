@@ -3,6 +3,7 @@ Celery Application Configuration with RabbitMQ
 """
 from celery import Celery
 from app.config import get_settings
+from app.celery_app import signals
 
 settings = get_settings()
 

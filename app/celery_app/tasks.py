@@ -21,6 +21,9 @@ from app.services.graceful_degradation import graceful_degradation_service
 from app.logger import app_logger
 from app.config import get_settings
 
+from app.utils.validators import validate_input_before_processing
+
+
 # Import safeguards for pre-validation
 from app.safeguards import (
     input_sanitizer,
@@ -167,14 +170,24 @@ class StageExecutor:
                     if self.context.idempotency_key and exit_result:
                         nested_result = exit_result.get('result', {})
                         if isinstance(nested_result, dict) and nested_result.get('success', False):
-                            await idempotency_service.store_result(
+                            app_logger.info(
+                                f"💾 [Task {self.context.task.request.id}] "
+                                f"Attempting to cache early exit result..."
+                            )
+                            cache_success = await idempotency_service.store_result(
                                 self.context.idempotency_key, 
                                 nested_result
                             )
-                            app_logger.info(
-                                f"💾 [Task {self.context.task.request.id}] "
-                                f"Early exit result cached"
-                            )
+                            if cache_success:
+                                app_logger.info(
+                                    f"✅ [Task {self.context.task.request.id}] "
+                                    f"Early exit result cached successfully"
+                                )
+                            else:
+                                app_logger.error(
+                                    f"❌ [Task {self.context.task.request.id}] "
+                                    f"Failed to cache early exit result"
+                                )
                     
                     return exit_result
                     
@@ -329,28 +342,70 @@ class StageExecutor:
             self.context.compliance_report.overall_compliance_ratio is not None
         )
         
+        # 🔍 DEBUG LOGGING
+        app_logger.info(f"🔍 [Task {self.context.task.request.id}] Cache decision analysis:")
+        app_logger.info(f"  - should_cache: {should_cache}")
+        app_logger.info(f"  - idempotency_key exists: {bool(self.context.idempotency_key)}")
+        app_logger.info(f"  - result.success: {result.success}")
+        app_logger.info(f"  - has compliance_report: {self.context.compliance_report is not None}")
+        if self.context.compliance_report:
+            app_logger.info(f"  - compliance_ratio: {self.context.compliance_report.overall_compliance_ratio}")
+        
         if self.context.idempotency_key and should_cache:
-            await idempotency_service.store_result(self.context.idempotency_key, result_dict)
             app_logger.info(
                 f"💾 [Task {self.context.task.request.id}] "
-                f"Result cached for idempotency"
+                f"Attempting to cache result with key: {self.context.idempotency_key[:30]}..."
             )
+            
+            cache_success = await idempotency_service.store_result(
+                self.context.idempotency_key, 
+                result_dict
+            )
+            
+            if cache_success:
+                app_logger.info(
+                    f"✅ [Task {self.context.task.request.id}] "
+                    f"Result cached successfully for idempotency"
+                )
+            else:
+                app_logger.error(
+                    f"❌ [Task {self.context.task.request.id}] "
+                    f"Failed to cache result for idempotency"
+                )
         elif self.context.idempotency_key and not should_cache:
             app_logger.info(
                 f"⏭️ [Task {self.context.task.request.id}] "
                 f"Result NOT cached (success={result.success}, has_report={self.context.compliance_report is not None})"
             )
+        elif not self.context.idempotency_key:
+            app_logger.warning(
+                f"⚠️ [Task {self.context.task.request.id}] "
+                f"No idempotency_key provided - cannot cache"
+            )
         
+        # Cache for graceful degradation
         if should_cache:
-            await graceful_degradation_service.cache_successful_result(
+            app_logger.info(
+                f"💾 [Task {self.context.task.request.id}] "
+                f"Attempting to cache for graceful degradation..."
+            )
+            
+            degradation_cache_success = await graceful_degradation_service.cache_successful_result(
                 self.context.policy_text,
                 self.context.policy_type,
                 result_dict
             )
-            app_logger.info(
-                f"💾 [Task {self.context.task.request.id}] "
-                f"Result cached for graceful degradation"
-            )
+            
+            if degradation_cache_success:
+                app_logger.info(
+                    f"✅ [Task {self.context.task.request.id}] "
+                    f"Result cached for graceful degradation"
+                )
+            else:
+                app_logger.error(
+                    f"❌ [Task {self.context.task.request.id}] "
+                    f"Failed to cache for graceful degradation"
+                )
         
         app_logger.info(
             f"✅ [Task {self.context.task.request.id}] Analysis completed successfully - "
@@ -362,106 +417,6 @@ class StageExecutor:
             'from_cache': False,
             'result': result_dict
         }
-
-
-def validate_input_before_processing(
-    shop_name: str,
-    shop_specialization: str,
-    policy_text: str,
-    task_id: str
-) -> tuple[bool, Optional[Dict]]:
-    """
-    Pre-stage validation using safeguards
-    Returns (is_valid, error_response)
-    """
-    app_logger.info(f"🔒 [Task {task_id}] Running pre-stage input validation")
-    
-    # 1. Length validation
-    is_valid, error_msg = input_sanitizer.validate_text_length(policy_text, "نص السياسة")
-    if not is_valid:
-        app_logger.warning(f"❌ [Task {task_id}] Length validation failed: {error_msg}")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'length_error',
-            'message': 'خطأ في طول النص',
-            'details': error_msg,
-            'stage': 'pre_validation',
-            'user_action': 'يرجى التأكد من أن النص يحتوي على 50 حرف على الأقل ولا يتجاوز 50,000 حرف'
-        }
-    
-    # 2. Suspicious content check
-    is_safe, reason = input_sanitizer.check_suspicious_content(policy_text)
-    if not is_safe:
-        app_logger.warning(f"❌ [Task {task_id}] Suspicious content detected: {reason}")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'suspicious_content',
-            'message': 'تم اكتشاف محتوى مشبوه',
-            'details': reason,
-            'stage': 'pre_validation',
-            'user_action': 'يرجى إزالة أي أكواد برمجية أو محتوى غير قانوني من النص'
-        }
-    
-    # 3. Blocked content check
-    is_blocked, reason = content_filter.contains_blocked_content(policy_text)
-    if is_blocked:
-        app_logger.warning(f"❌ [Task {task_id}] Blocked content detected: {reason}")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'blocked_content',
-            'message': 'تم اكتشاف محتوى محظور',
-            'details': 'النص يحتوي على كلمات أو عبارات غير مسموح بها',
-            'stage': 'pre_validation',
-            'user_action': 'يرجى مراجعة النص وإزالة أي محتوى غير ملائم'
-        }
-    
-    # 4. Repetitive content check (spam detection)
-    is_valid, reason = content_filter.check_repetitive_content(policy_text)
-    if not is_valid:
-        app_logger.warning(f"❌ [Task {task_id}] Repetitive content detected")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'spam_detected',
-            'message': 'تم اكتشاف تكرار مفرط في النص',
-            'details': 'النص يحتوي على تكرار غير طبيعي لنفس الكلمات أو العبارات',
-            'stage': 'pre_validation',
-            'user_action': 'يرجى تقديم نص حقيقي وليس محتوى مكرر أو عشوائي'
-        }
-    
-    # 5. Shop name validation
-    shop_name_clean = input_sanitizer.sanitize_text(shop_name)
-    if len(shop_name_clean) < 2:
-        app_logger.warning(f"❌ [Task {task_id}] Shop name too short")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'invalid_shop_name',
-            'message': 'اسم المتجر غير صالح',
-            'details': 'اسم المتجر قصير جداً أو يحتوي على أحرف غير صالحة',
-            'stage': 'pre_validation',
-            'user_action': 'يرجى إدخال اسم متجر صحيح (حرفان على الأقل)'
-        }
-    
-    # 6. Specialization validation
-    specialization_clean = input_sanitizer.sanitize_text(shop_specialization)
-    if len(specialization_clean) < 2:
-        app_logger.warning(f"❌ [Task {task_id}] Specialization too short")
-        return False, {
-            'success': False,
-            'error_type': 'validation_error',
-            'error_category': 'invalid_specialization',
-            'message': 'تخصص المتجر غير صالح',
-            'details': 'تخصص المتجر قصير جداً أو يحتوي على أحرف غير صالحة',
-            'stage': 'pre_validation',
-            'user_action': 'يرجى إدخال تخصص المتجر بشكل صحيح'
-        }
-    
-    app_logger.info(f"✅ [Task {task_id}] Pre-stage validation passed")
-    return True, None
 
 
 @celery_app.task(
@@ -517,22 +472,33 @@ async def analyze_policy_task(
             }
         )
         
-        # Initialize Redis connections
-        await idempotency_service.connect()
-        await graceful_degradation_service.connect()
+        # ✅ MongoDB is already connected via worker_process_init signal
+        # ❌ REMOVED: await idempotency_service.connect()
+        # ❌ REMOVED: await graceful_degradation_service.connect()
+        
+        app_logger.info(
+            f"📊 [Task {self.request.id}] MongoDB connection status: "
+            f"{await idempotency_service.mongodb.is_connected()}"
+        )
         
         # Check cache first (skip if force_refresh)
         if idempotency_key and not force_refresh:
+            app_logger.info(
+                f"🔍 [Task {self.request.id}] Checking cache with key: {idempotency_key[:30]}..."
+            )
             cached_result = await idempotency_service.get_cached_result(idempotency_key)
             if cached_result:
-                app_logger.info(f"✅ [Task {self.request.id}] Cache HIT")
+                app_logger.info(f"✅ [Task {self.request.id}] Cache HIT - Returning cached result")
                 return {
                     'success': True,
                     'from_cache': True,
                     'result': cached_result
                 }
+            app_logger.info(f"ℹ️ [Task {self.request.id}] Cache MISS - Will execute analysis")
         elif force_refresh:
             app_logger.info(f"🔄 [Task {self.request.id}] Force refresh - skipping cache check")
+        elif not idempotency_key:
+            app_logger.warning(f"⚠️ [Task {self.request.id}] No idempotency_key provided")
         
         # Create stage context
         context = StageContext(
@@ -584,9 +550,8 @@ async def analyze_policy_task(
         )
         raise Exception(f"[{error_type}] {error_message}")
     
-    finally:
-        await idempotency_service.disconnect()
-        await graceful_degradation_service.disconnect()
+    # ❌ REMOVED: finally block with disconnect
+    # MongoDB connection persists across tasks in the worker process
 
 
 @celery_app.task(name='app.celery_app.tasks.cleanup_old_results')
@@ -595,14 +560,9 @@ def cleanup_old_results():
     app_logger.info("🧹 Running cleanup of old results...")
     
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        loop.run_until_complete(idempotency_service.connect())
-        loop.run_until_complete(idempotency_service.disconnect())
-        loop.close()
-        
-        app_logger.info("✅ Cleanup completed")
+        # Note: Cleanup is handled automatically by MongoDB TTL indexes
+        # This task is kept for manual cleanup if needed
+        app_logger.info("✅ Cleanup completed (handled by MongoDB TTL)")
         return {'status': 'success', 'message': 'Cleanup completed'}
         
     except Exception as e:
@@ -618,7 +578,3 @@ def health_check():
         'timestamp': datetime.utcnow().isoformat(),
         'worker_id': health_check.request.id
     }
-
-# @celery_app.task(name='test.add')
-# def add(x, y):
-#     return x + y

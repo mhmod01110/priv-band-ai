@@ -3,7 +3,9 @@
 Utils Module
 وحدة الأدوات المساعدة
 """
+from .validators import validate_input_before_processing, validate_compliance_report_structure
 
-# يمكن إضافة دوال مساعدة هنا لاحقاً
-
-__all__ = []
+__all__ = [
+    'validate_input_before_processing',
+    'validate_compliance_report_structure'
+]
