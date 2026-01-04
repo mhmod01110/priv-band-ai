@@ -171,23 +171,55 @@ async def health_check():
     except:
         celery_healthy = False
     
-    # Check Redis
-    stats = await idempotency_service.get_stats()
-    redis_healthy = stats.get('connected', False)
+    # Check RabbitMQ connection (through Celery)
+    try:
+        # Ping RabbitMQ through Celery connection
+        celery_app.connection().ensure_connection(max_retries=3)
+        rabbitmq_healthy = True
+    except Exception as e:
+        app_logger.error(f"RabbitMQ connection failed: {str(e)}")
+        rabbitmq_healthy = False
+    
+    # Check MongoDB
+    from app.services.mongodb_client import mongodb_client
+    mongodb_stats = await mongodb_client.get_stats()
+    mongodb_healthy = mongodb_stats.get('connected', False)
+    
+    # Check Idempotency Service
+    idempotency_stats = await idempotency_service.get_stats()
+    
+    # Check Graceful Degradation Service
+    from app.services.graceful_degradation import graceful_degradation_service
+    degradation_stats = await graceful_degradation_service.get_stats()
+    
+    # Overall status
+    overall_healthy = celery_healthy and rabbitmq_healthy and mongodb_healthy
     
     return {
-        "status": "healthy" if (celery_healthy and redis_healthy) else "degraded",
+        "status": "healthy" if overall_healthy else "degraded",
         "service": "Legal Policy Analyzer",
-        "celery": {
-            "status": "healthy" if celery_healthy else "unhealthy",
-            "workers": len(active_workers) if active_workers else 0
-        },
-        "redis": {
-            "status": "healthy" if redis_healthy else "unhealthy",
-            "idempotency": stats
+        "timestamp": datetime.utcnow().isoformat(),
+        "components": {
+            "celery": {
+                "status": "healthy" if celery_healthy else "unhealthy",
+                "workers": len(active_workers) if active_workers else 0,
+                "active_tasks": sum(len(tasks) for tasks in (active_workers or {}).values())
+            },
+            "rabbitmq": {
+                "status": "healthy" if rabbitmq_healthy else "unhealthy",
+                "broker_url": settings.celery_broker_url.split('@')[1] if '@' in settings.celery_broker_url else "***"
+            },
+            "mongodb": {
+                "status": "healthy" if mongodb_healthy else "unhealthy",
+                "database": settings.mongodb_database,
+                "collections": mongodb_stats.get('collections', {}),
+                "services": {
+                    "idempotency": idempotency_stats,
+                    "graceful_degradation": degradation_stats
+                }
+            }
         }
     }
-
 
 @app.get("/api/info")
 async def api_info():

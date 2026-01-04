@@ -1,12 +1,17 @@
+"""
+Graceful Degradation Service with MongoDB
+Caching successful AI responses for fallback
+"""
 import json
 import hashlib
 from typing import Optional, Dict, Any
-from datetime import datetime
-import redis.asyncio as redis
+from datetime import datetime, timedelta
 from app.config import get_settings
 from app.logger import app_logger
+from app.services.mongodb_client import mongodb_client
 
 settings = get_settings()
+
 
 class GracefulDegradationService:
     """
@@ -15,47 +20,34 @@ class GracefulDegradationService:
     historically successful analyses for similar inputs.
     """
     
+    COLLECTION_NAME = "graceful_fallback"
+    
     def __init__(self):
         self.settings = settings
         self.logger = app_logger
-        self.redis_client: Optional[redis.Redis] = None
+        self.mongodb = mongodb_client
         # Default to 7 days if not specified in settings
         self.ttl = getattr(settings, 'graceful_degradation_ttl', 60 * 60 * 24 * 7)
         self.enabled = getattr(settings, 'graceful_degradation_enable', True)
         
     async def connect(self):
-        """Create Redis connection"""
+        """Create MongoDB connection"""
         if not self.enabled:
             self.logger.info("Graceful Degradation is disabled")
             return
             
         try:
-            self.redis_client = redis.Redis(
-                host=self.settings.redis_host,
-                port=self.settings.redis_port,
-                db=self.settings.redis_db,
-                password=self.settings.redis_password if self.settings.redis_password else None,
-                ssl=self.settings.redis_ssl,
-                decode_responses=self.settings.redis_decode_responses,
-                socket_connect_timeout=5,
-                socket_keepalive=True,
-                health_check_interval=30
-            )
-            
-            # Test connection
-            await self.redis_client.ping()
-            self.logger.info("✅ Redis connected successfully for Graceful Degradation")
+            await self.mongodb.connect()
+            self.logger.info("✅ Graceful Degradation service connected to MongoDB")
             
         except Exception as e:
-            self.logger.error(f"❌ Failed to connect to Redis (Graceful Degradation): {str(e)}")
-            self.redis_client = None
+            self.logger.error(f"❌ Failed to connect Graceful Degradation service: {str(e)}")
             # We don't raise here to allow the app to start without fallback capability
     
     async def disconnect(self):
-        """Close Redis connection"""
-        if self.redis_client:
-            await self.redis_client.close()
-            self.logger.info("Graceful Degradation Redis connection closed")
+        """Close MongoDB connection"""
+        # MongoDB client handles disconnection centrally
+        pass
 
     def _generate_content_hash(self, text: str) -> str:
         """
@@ -67,7 +59,7 @@ class GracefulDegradationService:
         return hashlib.sha256(text.strip().encode()).hexdigest()
 
     def _get_cache_key(self, policy_type: str, content_hash: str) -> str:
-        """Format the Redis key"""
+        """Format the cache key"""
         return f"graceful_fallback:{policy_type}:{content_hash}"
 
     async def get_cached_similar_result(
@@ -78,32 +70,37 @@ class GracefulDegradationService:
         """
         Retrieve a previously successful analysis for the same content.
         """
-        if not self.enabled or not self.redis_client or not policy_text:
+        if not self.enabled or not await self.mongodb.is_connected() or not policy_text:
             return None
 
         try:
             content_hash = self._generate_content_hash(policy_text)
-            key = self._get_cache_key(policy_type, content_hash)
             
-            cached_data = await self.redis_client.get(key)
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
             
-            if cached_data:
+            # Find document
+            document = await collection.find_one({
+                "policy_type": policy_type,
+                "content_hash": content_hash,
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
+            if document:
                 self.logger.info(f"✨ Graceful Degradation: Cache HIT for {policy_type}")
-                result = json.loads(cached_data)
+                
+                result = document.get("result")
                 
                 # Add metadata indicating source
-                result['from_cache'] = True
-                result['graceful_degradation'] = True
-                result['retrieved_at'] = datetime.now().isoformat()
+                if isinstance(result, dict):
+                    result['from_cache'] = True
+                    result['graceful_degradation'] = True
+                    result['retrieved_at'] = datetime.utcnow().isoformat()
                 
                 return result
                 
             self.logger.debug(f"Graceful Degradation: Cache MISS for {policy_type}")
             return None
 
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON decode error in graceful degradation: {str(e)}")
-            return None
         except Exception as e:
             self.logger.error(f"Error retrieving fallback result: {str(e)}")
             return None
@@ -117,28 +114,39 @@ class GracefulDegradationService:
         """
         Store successful AI results for future fallback usage.
         """
-        if not self.enabled or not self.redis_client or not result:
+        if not self.enabled or not await self.mongodb.is_connected() or not result:
             return False
 
         try:
             content_hash = self._generate_content_hash(policy_text)
-            key = self._get_cache_key(policy_type, content_hash)
             
             # Clean result metadata before caching
             cache_payload = result.copy()
-            cache_payload['cached_at'] = datetime.now().isoformat()
             
             # Remove transient fields if they exist
             cache_payload.pop('from_cache', None)
             cache_payload.pop('graceful_degradation', None)
             
-            await self.redis_client.setex(
-                key,
-                self.ttl,
-                json.dumps(cache_payload, ensure_ascii=False)
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            expires_at = datetime.utcnow() + timedelta(seconds=self.ttl)
+            
+            document = {
+                "policy_type": policy_type,
+                "content_hash": content_hash,
+                "result": cache_payload,
+                "expires_at": expires_at,
+                "cached_at": datetime.utcnow(),
+                "ttl": self.ttl
+            }
+            
+            await collection.update_one(
+                {"policy_type": policy_type, "content_hash": content_hash},
+                {"$set": document},
+                upsert=True
             )
             
-            self.logger.debug(f"💾 Result cached for fallback: {key[:30]}...")
+            self.logger.debug(f"💾 Result cached for fallback: {policy_type}/{content_hash[:10]}...")
             return True
 
         except Exception as e:
@@ -149,19 +157,27 @@ class GracefulDegradationService:
         """
         Get service health stats
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return {"enabled": self.enabled, "connected": False}
             
         try:
-            # Count keys matching our prefix
-            # Note: KEYS is expensive, in production use SCAN or just return connected status
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            total_count = await collection.count_documents({})
+            active_count = await collection.count_documents({
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
             return {
                 "enabled": True,
                 "connected": True,
+                "total_cached": total_count,
+                "active_cached": active_count,
                 "ttl_setting": self.ttl
             }
         except Exception as e:
             return {"error": str(e)}
+
 
 # Singleton instance
 graceful_degradation_service = GracefulDegradationService()

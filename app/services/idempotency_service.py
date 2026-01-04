@@ -1,59 +1,51 @@
+"""
+Idempotency Service with MongoDB
+Prevents duplicate requests and caches results
+"""
 import json
 import hashlib
 from typing import Optional, Dict, Any
-from datetime import datetime
-import redis.asyncio as redis
+from datetime import datetime, timedelta
 from app.config import get_settings
 from app.logger import app_logger
+from app.services.mongodb_client import mongodb_client
 
 settings = get_settings()
 
+
 class IdempotencyService:
     """
-    خدمة إدارة Idempotency Keys مع Redis
+    خدمة إدارة Idempotency Keys مع MongoDB
     تمنع تكرار الطلبات وتحفظ النتائج لمدة محددة
     """
+    
+    COLLECTION_NAME = "idempotency"
     
     def __init__(self):
         self.settings = settings
         self.logger = app_logger
-        self.redis_client: Optional[redis.Redis] = None
+        self.mongodb = mongodb_client
         self.ttl = settings.idempotency_ttl
         self.enabled = settings.idempotency_enable
         
     async def connect(self):
-        """إنشاء اتصال مع Redis"""
+        """إنشاء اتصال مع MongoDB"""
         if not self.enabled:
             self.logger.info("Idempotency is disabled")
             return
             
         try:
-            self.redis_client = redis.Redis(
-                host=self.settings.redis_host,
-                port=self.settings.redis_port,
-                db=self.settings.redis_db,
-                password=self.settings.redis_password if self.settings.redis_password else None,
-                ssl=self.settings.redis_ssl,
-                decode_responses=self.settings.redis_decode_responses,
-                socket_connect_timeout=5,
-                socket_keepalive=True,
-                health_check_interval=30
-            )
-            
-            # اختبار الاتصال
-            await self.redis_client.ping()
-            self.logger.info("✅ Redis connected successfully for idempotency")
+            await self.mongodb.connect()
+            self.logger.info("✅ Idempotency service connected to MongoDB")
             
         except Exception as e:
-            self.logger.error(f"❌ Failed to connect to Redis: {str(e)}")
-            self.redis_client = None
+            self.logger.error(f"❌ Failed to connect idempotency service: {str(e)}")
             raise
     
     async def disconnect(self):
-        """إغلاق اتصال Redis"""
-        if self.redis_client:
-            await self.redis_client.close()
-            self.logger.info("Redis connection closed")
+        """إغلاق اتصال MongoDB"""
+        # MongoDB client handles disconnection centrally
+        pass
     
     def generate_key_from_request(self, request_data: Dict[str, Any]) -> str:
         """
@@ -80,29 +72,34 @@ class IdempotencyService:
         """
         استرجاع نتيجة محفوظة باستخدام idempotency key
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return None
             
         try:
             key = self._normalize_key(idempotency_key)
-            cached_data = await self.redis_client.get(key)
             
-            if cached_data:
+            # Get from MongoDB
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            document = await collection.find_one({
+                "key": key,
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
+            if document:
                 self.logger.info(f"✅ Cache HIT for key: {key[:20]}...")
-                result = json.loads(cached_data)
+                
+                result = document.get("value")
                 
                 # إضافة معلومة أن النتيجة من الـ cache
-                result["from_cache"] = True
-                result["cache_timestamp"] = result.get("timestamp", "")
+                if isinstance(result, dict):
+                    result["from_cache"] = True
+                    result["cache_timestamp"] = document.get("created_at", "").isoformat() if document.get("created_at") else ""
                 
                 return result
             
             self.logger.debug(f"Cache MISS for key: {key[:20]}...")
             return None
             
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON decode error from cache: {str(e)}")
-            return None
         except Exception as e:
             self.logger.error(f"Error getting cached result: {str(e)}")
             return None
@@ -114,9 +111,9 @@ class IdempotencyService:
         ttl_override: Optional[int] = None
     ) -> bool:
         """
-        حفظ نتيجة في Redis مع idempotency key
+        حفظ نتيجة في MongoDB مع idempotency key
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return False
             
         try:
@@ -124,14 +121,24 @@ class IdempotencyService:
             ttl = ttl_override or self.ttl
             
             # إضافة timestamp
-            result["timestamp"] = datetime.now().isoformat()
-            result["ttl"] = ttl
+            result_copy = result.copy()
             
-            # حفظ في Redis
-            await self.redis_client.setex(
-                key,
-                ttl,
-                json.dumps(result, ensure_ascii=False)
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            expires_at = datetime.utcnow() + timedelta(seconds=ttl)
+            
+            document = {
+                "key": key,
+                "value": result_copy,
+                "expires_at": expires_at,
+                "created_at": datetime.utcnow(),
+                "ttl": ttl
+            }
+            
+            await collection.update_one(
+                {"key": key},
+                {"$set": document},
+                upsert=True
             )
             
             self.logger.info(
@@ -147,13 +154,20 @@ class IdempotencyService:
         """
         التحقق من وجود طلب قيد التنفيذ بنفس المفتاح
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return False
             
         try:
             lock_key = f"{self._normalize_key(idempotency_key)}:lock"
-            exists = await self.redis_client.exists(lock_key)
-            return bool(exists)
+            
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            count = await collection.count_documents({
+                "key": lock_key,
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
+            return count > 0
             
         except Exception as e:
             self.logger.error(f"Error checking in-progress: {str(e)}")
@@ -167,26 +181,38 @@ class IdempotencyService:
         """
         وضع علامة أن الطلب قيد التنفيذ (lock)
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return True
             
         try:
             lock_key = f"{self._normalize_key(idempotency_key)}:lock"
             
-            # استخدام SET NX (set if not exists) مع expiry
-            was_set = await self.redis_client.set(
-                lock_key,
-                datetime.now().isoformat(),
-                nx=True,  # فقط إذا لم يكن موجود
-                ex=timeout  # ينتهي بعد timeout ثانية
-            )
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
             
-            if was_set:
-                self.logger.debug(f"Lock acquired for key: {lock_key[:30]}...")
-                return True
-            else:
+            # Check if lock already exists
+            existing = await collection.find_one({
+                "key": lock_key,
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
+            if existing:
                 self.logger.warning(f"Lock already exists for key: {lock_key[:30]}...")
                 return False
+            
+            # Create lock
+            expires_at = datetime.utcnow() + timedelta(seconds=timeout)
+            
+            document = {
+                "key": lock_key,
+                "value": datetime.utcnow().isoformat(),
+                "expires_at": expires_at,
+                "created_at": datetime.utcnow()
+            }
+            
+            await collection.insert_one(document)
+            
+            self.logger.debug(f"Lock acquired for key: {lock_key[:30]}...")
+            return True
                 
         except Exception as e:
             self.logger.error(f"Error marking in-progress: {str(e)}")
@@ -196,12 +222,15 @@ class IdempotencyService:
         """
         إزالة علامة التنفيذ (unlock)
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return
             
         try:
             lock_key = f"{self._normalize_key(idempotency_key)}:lock"
-            await self.redis_client.delete(lock_key)
+            
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            await collection.delete_one({"key": lock_key})
+            
             self.logger.debug(f"Lock released for key: {lock_key[:30]}...")
             
         except Exception as e:
@@ -211,14 +240,16 @@ class IdempotencyService:
         """
         حذف نتيجة محفوظة (للحالات الخاصة)
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return False
             
         try:
             key = self._normalize_key(idempotency_key)
-            deleted = await self.redis_client.delete(key)
             
-            if deleted:
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            result = await collection.delete_one({"key": key})
+            
+            if result.deleted_count > 0:
                 self.logger.info(f"Deleted cached result for key: {key[:20]}...")
                 return True
             return False
@@ -239,18 +270,22 @@ class IdempotencyService:
         """
         إحصائيات عن الـ cache
         """
-        if not self.enabled or not self.redis_client:
+        if not self.enabled or not await self.mongodb.is_connected():
             return {"enabled": False}
             
         try:
-            info = await self.redis_client.info("stats")
-            keys_count = await self.redis_client.dbsize()
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            total_keys = await collection.count_documents({})
+            active_keys = await collection.count_documents({
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
             
             return {
                 "enabled": True,
-                "total_keys": keys_count,
-                "keyspace_hits": info.get("keyspace_hits", 0),
-                "keyspace_misses": info.get("keyspace_misses", 0),
+                "total_keys": total_keys,
+                "active_keys": active_keys,
+                "expired_keys": total_keys - active_keys,
                 "connected": True
             }
         except Exception as e:

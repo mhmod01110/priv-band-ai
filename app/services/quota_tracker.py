@@ -1,12 +1,12 @@
 """
-Quota Tracker
+Quota Tracker with MongoDB
 Track and manage AI provider quotas
 """
-import redis.asyncio as redis
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 from app.config import get_settings
 from app.logger import app_logger
+from app.services.mongodb_client import mongodb_client
 
 settings = get_settings()
 
@@ -16,8 +16,10 @@ class QuotaTracker:
     Track token usage and quota for AI providers
     """
     
+    COLLECTION_NAME = "quota"
+    
     def __init__(self):
-        self.redis_client: Optional[redis.Redis] = None
+        self.mongodb = mongodb_client
         
         # Quota limits (configurable per provider)
         self.limits = {
@@ -40,17 +42,9 @@ class QuotaTracker:
         self.critical_threshold = 0.90  # 90%
     
     async def connect(self):
-        """Initialize Redis connection"""
-        if not self.redis_client:
-            self.redis_client = redis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                db=settings.redis_db,
-                password=settings.redis_password if settings.redis_password else None,
-                decode_responses=True
-            )
-            await self.redis_client.ping()
-            app_logger.info("✅ QuotaTracker connected to Redis")
+        """Initialize MongoDB connection"""
+        await self.mongodb.connect()
+        app_logger.info("✅ QuotaTracker connected to MongoDB")
     
     async def check_quota(self, provider: str, estimated_tokens: int) -> bool:
         """
@@ -63,7 +57,8 @@ class QuotaTracker:
         Returns:
             True if quota available, False otherwise
         """
-        await self.connect()
+        if not await self.mongodb.is_connected():
+            await self.connect()
         
         # Get current usage
         daily_tokens = await self._get_usage(provider, 'daily', 'tokens')
@@ -119,25 +114,75 @@ class QuotaTracker:
             tokens_used: Number of tokens used
             requests: Number of requests (default 1)
         """
-        await self.connect()
+        if not await self.mongodb.is_connected():
+            await self.connect()
         
         now = datetime.utcnow()
         
-        # Daily keys
-        daily_key_prefix = f"quota:{provider}:daily:{now.strftime('%Y-%m-%d')}"
-        await self.redis_client.incrby(f"{daily_key_prefix}:tokens", tokens_used)
-        await self.redis_client.incrby(f"{daily_key_prefix}:requests", requests)
-        await self.redis_client.expire(f"{daily_key_prefix}:tokens", 86400 * 2)  # 2 days
-        await self.redis_client.expire(f"{daily_key_prefix}:requests", 86400 * 2)
+        # Update daily counters
+        await self._increment_counter(
+            provider=provider,
+            period_type='daily',
+            period_key=now.strftime('%Y-%m-%d'),
+            tokens=tokens_used,
+            requests=requests,
+            expires_in_seconds=86400 * 2  # 2 days
+        )
         
-        # Hourly keys
-        hourly_key_prefix = f"quota:{provider}:hourly:{now.strftime('%Y-%m-%d:%H')}"
-        await self.redis_client.incrby(f"{hourly_key_prefix}:tokens", tokens_used)
-        await self.redis_client.incrby(f"{hourly_key_prefix}:requests", requests)
-        await self.redis_client.expire(f"{hourly_key_prefix}:tokens", 7200)  # 2 hours
-        await self.redis_client.expire(f"{hourly_key_prefix}:requests", 7200)
+        # Update hourly counters
+        await self._increment_counter(
+            provider=provider,
+            period_type='hourly',
+            period_key=now.strftime('%Y-%m-%d:%H'),
+            tokens=tokens_used,
+            requests=requests,
+            expires_in_seconds=7200  # 2 hours
+        )
         
         app_logger.debug(f"📊 Quota updated for {provider}: +{tokens_used} tokens, +{requests} requests")
+    
+    async def _increment_counter(
+        self,
+        provider: str,
+        period_type: str,
+        period_key: str,
+        tokens: int,
+        requests: int,
+        expires_in_seconds: int
+    ):
+        """
+        Increment usage counter in MongoDB
+        """
+        try:
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            expires_at = datetime.utcnow() + timedelta(seconds=expires_in_seconds)
+            
+            # Use $inc to atomically increment counters
+            await collection.update_one(
+                {
+                    "provider": provider,
+                    "period_type": period_type,
+                    "period_key": period_key
+                },
+                {
+                    "$inc": {
+                        "tokens": tokens,
+                        "requests": requests
+                    },
+                    "$set": {
+                        "expires_at": expires_at,
+                        "last_updated": datetime.utcnow()
+                    },
+                    "$setOnInsert": {
+                        "created_at": datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+            
+        except Exception as e:
+            app_logger.error(f"Error incrementing counter: {str(e)}")
     
     async def _get_usage(self, provider: str, period: str, metric: str) -> int:
         """
@@ -151,15 +196,31 @@ class QuotaTracker:
         Returns:
             Current usage count
         """
-        now = datetime.utcnow()
-        
-        if period == 'daily':
-            key = f"quota:{provider}:daily:{now.strftime('%Y-%m-%d')}:{metric}"
-        else:  # hourly
-            key = f"quota:{provider}:hourly:{now.strftime('%Y-%m-%d:%H')}:{metric}"
-        
-        value = await self.redis_client.get(key)
-        return int(value) if value else 0
+        try:
+            now = datetime.utcnow()
+            
+            if period == 'daily':
+                period_key = now.strftime('%Y-%m-%d')
+            else:  # hourly
+                period_key = now.strftime('%Y-%m-%d:%H')
+            
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            document = await collection.find_one({
+                "provider": provider,
+                "period_type": period,
+                "period_key": period_key,
+                "expires_at": {"$gt": datetime.utcnow()}
+            })
+            
+            if document:
+                return document.get(metric, 0)
+            
+            return 0
+            
+        except Exception as e:
+            app_logger.error(f"Error getting usage: {str(e)}")
+            return 0
     
     async def get_usage_stats(self, provider: str) -> Dict:
         """
@@ -214,24 +275,19 @@ class QuotaTracker:
         """
         Reset quota counters (admin function)
         """
-        await self.connect()
+        if not await self.mongodb.is_connected():
+            await self.connect()
         
-        now = datetime.utcnow()
-        
-        # Delete daily and hourly keys
-        daily_pattern = f"quota:{provider}:daily:*"
-        hourly_pattern = f"quota:{provider}:hourly:*"
-        
-        # Note: In production, use SCAN for large keyspaces
-        daily_keys = await self.redis_client.keys(daily_pattern)
-        hourly_keys = await self.redis_client.keys(hourly_pattern)
-        
-        if daily_keys:
-            await self.redis_client.delete(*daily_keys)
-        if hourly_keys:
-            await self.redis_client.delete(*hourly_keys)
-        
-        app_logger.info(f"🔄 Quota reset for {provider}")
+        try:
+            collection = self.mongodb.get_collection(self.COLLECTION_NAME)
+            
+            # Delete all documents for this provider
+            result = await collection.delete_many({"provider": provider})
+            
+            app_logger.info(f"🔄 Quota reset for {provider} - Deleted {result.deleted_count} documents")
+            
+        except Exception as e:
+            app_logger.error(f"Error resetting quota: {str(e)}")
     
     async def get_all_providers_stats(self) -> Dict:
         """

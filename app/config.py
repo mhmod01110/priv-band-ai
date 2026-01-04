@@ -31,20 +31,36 @@ class Settings(BaseSettings):
     gemini_heavy_max_tokens: int = 16000
     
     # ============================================
-    # Redis Configuration (Shared)
+    # MongoDB Configuration
     # ============================================
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: str = ""
-    redis_ssl: bool = False
-    redis_decode_responses: bool = True
+    mongodb_url: str = "mongodb://localhost:27017"
+    mongodb_database: str = "legal_policy_analyzer"
+    mongodb_username: str = ""
+    mongodb_password: str = ""
+    mongodb_auth_source: str = "admin"
+    mongodb_min_pool_size: int = 10
+    mongodb_max_pool_size: int = 100
+    mongodb_timeout: int = 5000
     
     # ============================================
-    # Celery Configuration (NEW)
+    # RabbitMQ Configuration (Replaces Redis for Celery)
     # ============================================
-    celery_broker_url: str = "redis://localhost:6379/1"
-    celery_result_backend: str = "redis://localhost:6379/2"
+    rabbitmq_host: str = "localhost"
+    rabbitmq_port: int = 5672
+    rabbitmq_username: str = "guest"
+    rabbitmq_password: str = "guest"
+    rabbitmq_vhost: str = "/"
+    rabbitmq_management_port: int = 15672
+    
+    # Celery Broker URL (RabbitMQ)
+    celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
+    
+    # Celery Result Backend (MongoDB)
+    celery_result_backend: str = "mongodb://localhost:27017/legal_policy_analyzer"
+    
+    # ============================================
+    # Celery Configuration
+    # ============================================
     celery_task_track_started: bool = True
     celery_task_time_limit: int = 600
     celery_task_soft_time_limit: int = 540
@@ -102,6 +118,12 @@ class Settings(BaseSettings):
     idempotency_ttl: int = 86400
     idempotency_key_header: str = "X-Idempotency-Key"
     idempotency_enable: bool = True
+    
+    # ============================================
+    # Graceful Degradation Settings
+    # ============================================
+    graceful_degradation_ttl: int = 604800  # 7 days
+    graceful_degradation_enable: bool = True
     
     class Config:
         env_file = ".env"

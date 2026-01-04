@@ -618,3 +618,7 @@ def health_check():
         'timestamp': datetime.utcnow().isoformat(),
         'worker_id': health_check.request.id
     }
+
+# @celery_app.task(name='test.add')
+# def add(x, y):
+#     return x + y
