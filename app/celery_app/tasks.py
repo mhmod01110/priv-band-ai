@@ -54,14 +54,40 @@ STAGE_CLASSES = [
 
 
 class AsyncTask(Task):
-    """Base Task class that handles async/await properly"""
+    """
+    Base Task class optimized for gevent pool
+    """
+    _event_loop = None
+    
+    @classmethod
+    def get_event_loop(cls):
+        """
+        احصل على event loop مشترك بدل إنشاء واحد جديد لكل task
+        ده بيحسن الأداء جداً
+        """
+        if cls._event_loop is None or cls._event_loop.is_closed():
+            cls._event_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(cls._event_loop)
+        return cls._event_loop
+    
     def __call__(self, *args, **kwargs):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        """
+        تنفيذ الـ task باستخدام event loop مشترك
+        """
+        loop = self.get_event_loop()
         try:
             return loop.run_until_complete(self.run(*args, **kwargs))
-        finally:
-            loop.close()
+        except Exception as e:
+            # تسجيل الخطأ
+            from app.logger import app_logger
+            app_logger.error(f"Task {self.name} failed: {str(e)}")
+            raise
+    
+    async def run(self, *args, **kwargs) -> Any:
+        """
+        Override this method in subclasses
+        """
+        raise NotImplementedError("Subclasses must implement run()")
 
 
 class StageContext:
