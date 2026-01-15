@@ -83,6 +83,47 @@ class PolicyAnalysisRequest(BaseModel):
             }
         }
 
+class ForceNewAnalysisRequest(PolicyAnalysisRequest):
+    idempotency_key: str = Field(
+      ..., 
+      min_length=32,  # SHA256 hash length
+      max_length=200,
+      description="مفتاح التحليل الفريد من الطلب السابق"
+  )
+    @field_validator('idempotency_key')
+    @classmethod
+    def validate_idempotency_key(cls, v: str) -> str:
+      """التحقق من صحة idempotency_key"""
+      # إزالة المسافات الزائدة
+      v = v.strip()
+      
+      # التحقق من format: "idempotency:HASH"
+      if not v.startswith("idempotency:"):
+          raise ValueError("مفتاح التحليل يجب أن يبدأ بـ 'idempotency:'")
+      
+      # استخراج الـ hash part
+      hash_part = v.replace("idempotency:", "", 1)
+      
+      # التحقق من أن الـ hash يحتوي على hex characters فقط
+      if not hash_part or not all(c in '0123456789abcdefABCDEF' for c in hash_part):
+          raise ValueError("مفتاح التحليل غير صالح - يجب أن يكون hash hex صحيح")
+      
+      # التحقق من طول الـ hash (SHA256 = 64 حرف)
+      if len(hash_part) != 64:
+          raise ValueError("مفتاح التحليل غير صالح - الطول غير صحيح")
+      
+      return v  # إرجاع الـ key كما هو (مع prefix)
+      
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "idempotency_key": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+                "shop_name": "متجر الأزياء العصرية",
+                "shop_specialization": "ملابس نسائية",
+                "policy_type": "سياسات الاسترجاع و الاستبدال",
+                "policy_text": "يحق للعميل إرجاع المنتج خلال 7 أيام من تاريخ الاستلام..."
+            }
+        }  
 # --- باقي الموديلات كما هي، مع تعديل AnalysisResponse ---
 
 class CriticalIssue(BaseModel):

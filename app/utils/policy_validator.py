@@ -183,12 +183,10 @@ class PolicyValidator:
     
     def _make_decision(self, scores: Dict, rules: Dict) -> Dict:
         """
-        Make final decision based on scores
+        اتخاذ القرار النهائي بناءً على النسب
         """
-        # Calculate weighted confidence
-        # Required keywords are most important
+        # حساب الثقة المرجحة
         if scores['required_keywords'] == 0:
-            # No required keywords found - likely mismatch
             confidence = 0.1 + (scores['moderate_indicators'] * 0.1)
             return {
                 'confidence': confidence,
@@ -198,9 +196,8 @@ class PolicyValidator:
                 'details': scores
             }
         
-        # Forbidden topics check
+        # فحص المواضيع المحظورة
         if scores['forbidden_topics'] > 0.5:
-            # Too many forbidden topics - likely mismatch
             confidence = 0.2
             return {
                 'confidence': confidence,
@@ -210,7 +207,7 @@ class PolicyValidator:
                 'details': scores
             }
         
-        # Calculate final confidence
+        # حساب الثقة النهائية
         weights = {
             'required_keywords': 0.35,
             'strong_indicators': 0.25,
@@ -224,30 +221,44 @@ class PolicyValidator:
             for key, weight in weights.items()
         )
         
-        # Penalty for forbidden topics
+        # عقوبة للمواضيع المحظورة
         confidence *= (1 - scores['forbidden_topics'] * 0.5)
         
-        # Determine if we should skip AI
+        # ✅ المنطق الصحيح - محاذي مع Stage 1 (30-70%)
         skip_ai = False
         is_matched = None
         reason = ''
         
-        if confidence >= self.confidence_thresholds['high']:
-            # Very confident match - skip AI
-            skip_ai = True
-            is_matched = True
-            reason = 'تطابق قوي - النص يحتوي على جميع المؤشرات المطلوبة'
+        # الحالة 1: نسبة عالية (>= 70%)
+        if confidence >= 0.70:
+            is_matched = True  # ✅ متأكد إنها matched
+            
+            if confidence >= 0.85:
+                # واثق جدًا - نتخطى AI تمامًا
+                skip_ai = True
+                reason = 'تطابق قوي - النص يحتوي على جميع المؤشرات المطلوبة'
+            else:
+                # واثق بس مش جدًا - هنأكد في Stage 3 بدون Stage 1
+                skip_ai = False
+                reason = 'تطابق جيد - تم التحقق بالقواعد المحلية'
         
-        elif confidence <= self.confidence_thresholds['very_low']:
-            # Very confident mismatch - skip AI
-            skip_ai = True
-            is_matched = False
-            reason = 'عدم تطابق واضح - النص لا يحتوي على المؤشرات الكافية'
+        # الحالة 2: نسبة منخفضة (<= 30%)
+        elif confidence <= 0.30:
+            is_matched = False  # ✅ متأكد إنها مش matched
+            
+            if confidence <= 0.20:
+                # واثق جدًا إنها غلط - نتخطى AI تمامًا
+                skip_ai = True
+                reason = 'عدم تطابق واضح - النص لا يحتوي على المؤشرات الكافية'
+            else:
+                # شبه متأكد إنها غلط - هنأكد في Stage 3 بدون Stage 1
+                skip_ai = False
+                reason = 'تطابق ضعيف - تم التحقق بالقواعد المحلية'
         
-        else:
-            # Uncertain - use AI
+        # الحالة 3: نسبة غامضة (30-70%) ← المنطقة الوحيدة لـ None
+        else:  # 30% < confidence < 70%
+            is_matched = None  # ❓ مش متأكد - محتاج AI في Stage 1
             skip_ai = False
-            is_matched = None
             reason = 'يحتاج تحليل إضافي بواسطة الذكاء الاصطناعي'
         
         return {
