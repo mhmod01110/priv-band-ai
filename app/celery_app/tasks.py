@@ -3,12 +3,14 @@ Celery Task Definitions with Pre-Stage Validation
 All long-running analysis tasks with comprehensive input validation
 """
 import asyncio
+import sys
 from datetime import datetime, timedelta
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
 from typing import Dict, Any, Callable, Optional
 
 from app.celery_app.celery import celery_app
+from app.celery_app.asyncio_runner import run_async
 from app.models import (
     PolicyAnalysisRequest, 
     PolicyType, 
@@ -53,42 +55,14 @@ STAGE_CLASSES = [
 ]
 
 
-class AsyncTask(Task):
+class GeventAsyncTask(Task):
     """
-    Base Task class optimized for gevent pool
+    gevent pool safe:
+    - no per-task event loop
+    - executes async code on a dedicated loop thread
     """
-    _event_loop = None
-    
-    @classmethod
-    def get_event_loop(cls):
-        """
-        احصل على event loop مشترك بدل إنشاء واحد جديد لكل task
-        ده بيحسن الأداء جداً
-        """
-        if cls._event_loop is None or cls._event_loop.is_closed():
-            cls._event_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(cls._event_loop)
-        return cls._event_loop
-    
     def __call__(self, *args, **kwargs):
-        """
-        تنفيذ الـ task باستخدام event loop مشترك
-        """
-        loop = self.get_event_loop()
-        try:
-            return loop.run_until_complete(self.run(*args, **kwargs))
-        except Exception as e:
-            # تسجيل الخطأ
-            from app.logger import app_logger
-            app_logger.error(f"Task {self.name} failed: {str(e)}")
-            raise
-    
-    async def run(self, *args, **kwargs) -> Any:
-        """
-        Override this method in subclasses
-        """
-        raise NotImplementedError("Subclasses must implement run()")
-
+        return run_async(self.run(*args, **kwargs))
 
 class StageContext:
     """Context object to pass data between stages"""
@@ -446,7 +420,7 @@ class StageExecutor:
 
 
 @celery_app.task(
-    base=AsyncTask,
+    base=GeventAsyncTask,
     bind=True,
     name='app.celery_app.tasks.analyze_policy_task',
     max_retries=3,

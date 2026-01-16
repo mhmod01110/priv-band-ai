@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from typing import List, Optional
+from typing import List
 
 class Settings(BaseSettings):
     # ============================================
@@ -31,16 +31,6 @@ class Settings(BaseSettings):
     gemini_heavy_max_tokens: int = 16000
     
     # ============================================
-    # Redis Configuration (Shared)
-    # ============================================
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: Optional[str] = ""
-    redis_ssl: bool = False
-    redis_decode_responses: bool = True
-
-    # ============================================
     # MongoDB Configuration
     # ============================================
     mongodb_url: str = "mongodb://localhost:27017"
@@ -53,31 +43,32 @@ class Settings(BaseSettings):
     mongodb_timeout: int = 5000
     
     # ============================================
-    # Celery Optimized Configuration
+    # RabbitMQ Configuration (Replaces Redis for Celery)
     # ============================================
+    rabbitmq_host: str = "localhost"
+    rabbitmq_port: int = 5672
+    rabbitmq_username: str = "guest"
+    rabbitmq_password: str = "guest"
+    rabbitmq_vhost: str = "/"
+    rabbitmq_management_port: int = 15672
+    
+    # Celery Broker URL (RabbitMQ)
     celery_broker_url: str = "amqp://guest:guest@localhost:5672//"
+    
+    # Celery Result Backend (MongoDB)
     celery_result_backend: str = "mongodb://localhost:27017/legal_policy_analyzer"
     
-    celery_worker_concurrency: int = 50
-    celery_worker_pool: str = "gevent"
-    celery_worker_prefetch_multiplier: int = 4
-    
+    # ============================================
+    # Celery Configuration
+    # ============================================
     celery_task_track_started: bool = True
     celery_task_time_limit: int = 600
     celery_task_soft_time_limit: int = 540
     celery_task_acks_late: bool = True
-    
-    celery_task_compression: str = "gzip"
-    celery_result_compression: str = "gzip"
-    celery_worker_disable_rate_limits: bool = True
-    
+    celery_worker_prefetch_multiplier: int = 1
     celery_result_expires: int = 86400
     celery_task_max_retries: int = 3
     celery_task_default_retry_delay: int = 60
-    
-    celery_broker_pool_limit: int = 50
-    celery_broker_connection_retry: bool = True
-    celery_broker_connection_max_retries: int = 10
     
     # ============================================
     # API Configuration
@@ -98,26 +89,41 @@ class Settings(BaseSettings):
     rate_limit_window: int = 60
     rate_limit_block_duration: int = 15
     
-    max_request_size: int = 10485760
+    max_request_size: int = 10 * 1024 * 1024
     max_text_length: int = 50000
     min_text_length: int = 50
     
     # ============================================
-    # AI Service Limits & Circuit Breaker
+    # AI Service Limits
     # ============================================
     max_daily_requests: int = 1000
     max_daily_tokens: int = 1000000
     ai_timeout: int = 120
     ai_max_retries: int = 3
     
+    # ============================================
+    # Circuit Breaker
+    # ============================================
     circuit_breaker_threshold: int = 5
     circuit_breaker_timeout: int = 120
     
+    # ============================================
+    # Request Deduplication
+    # ============================================
     deduplication_ttl: int = 300
     
+    # ============================================
+    # Idempotency Settings
+    # ============================================
     idempotency_ttl: int = 86400
     idempotency_key_header: str = "X-Idempotency-Key"
     idempotency_enable: bool = True
+    
+    # ============================================
+    # Graceful Degradation Settings
+    # ============================================
+    graceful_degradation_ttl: int = 604800  # 7 days
+    graceful_degradation_enable: bool = True
     
     class Config:
         env_file = ".env"
