@@ -20,7 +20,7 @@ celery[mongodb]==5.3.6
 # ============================================
 gevent==23.9.1  # Greenlet-based concurrency (RECOMMENDED)
 greenlet==3.0.3  # Required by gevent
-eventlet==0.35.2  # Alternative to gevent (optional)
+eventlet==0.40.0
 
 # ============================================
 # FastAPI & Web Framework
@@ -70,3 +70,4 @@ python-dateutil==2.8.2
 flower==2.0.1  # Celery monitoring dashboard
 prometheus-client==0.19.0  # Prometheus Python client
 prometheus-fastapi-instrumentator==6.1.0  # FastAPI Prometheus integration
+

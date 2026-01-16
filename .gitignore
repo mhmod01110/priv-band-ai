@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+wsl-venv/
 env/
 ENV/
 
@@ -21,6 +22,7 @@ ENV/
 .pytest_cache/
 htmlcov/
 .coverage
+test.py
 
 # OS
 .DS_Store
